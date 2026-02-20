@@ -1,0 +1,40 @@
+# Temporary notes
+/emoji.txt
+/missing.txt
+/need.txt
+/okayOneButNotGood.txt
+/previous.txt
+/till now okay.txt
+
+# Uploads folder (user data)
+uploads/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environment variables (contains secrets)
+backend/.env
+.env
+
+# Firebase config (contains secrets)
+backend/firebase-config.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
