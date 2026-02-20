@@ -6698,9 +6698,10 @@
                     }
                     
                     if (att.type === 'image') {
-                        const imageUrl   = att.url.startsWith('http') ? att.url : `${window.location.origin}${att.url}`;
+                        // Fix URL construction - URLs from backend already include /api/uploads/
+                        const imageUrl   = att.url.startsWith('http') ? att.url : att.url;
                         const thumbUrl   = att.thumbnail_url
-                            ? (att.thumbnail_url.startsWith('http') ? att.thumbnail_url : `${window.location.origin}${att.thumbnail_url}`)
+                            ? (att.thumbnail_url.startsWith('http') ? att.thumbnail_url : att.thumbnail_url)
                             : imageUrl;
 
                         attachmentsHtml += `
@@ -6719,7 +6720,7 @@
                             </div>
                         `;
                     } else if (att.type === 'video') {
-                        const videoUrl = att.url.startsWith('http') ? att.url : `${window.location.origin}${att.url}`;
+                        const videoUrl = att.url.startsWith('http') ? att.url : att.url;
                         attachmentsHtml += `
                             <div class="message-attachment">
                                 <video 
@@ -6733,7 +6734,7 @@
                     } else if (message.message_type === 'voice' || att.type === 'audio') {
                         const duration = att.duration || '0:00';
                         const audioId = `audio_${message.id}_${att.id}`;
-                        const audioUrl = att.url.startsWith('http') ? att.url : `${window.location.origin}${att.url}`;
+                        const audioUrl = att.url.startsWith('http') ? att.url : att.url;
                         
                         attachmentsHtml += `
                             <div class="voice-message">

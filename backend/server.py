@@ -149,7 +149,8 @@ REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
 FIREBASE_CRED = os.getenv('FIREBASE_CRED_PATH', 'firebase-config.json')
 
 # File Upload Configuration
-UPLOAD_DIR = Path('./uploads')
+# Use parent directory's uploads folder (project root)
+UPLOAD_DIR = Path(__file__).parent.parent / 'uploads'
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 ALLOWED_EXTENSIONS = {
     'image': {'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'},
