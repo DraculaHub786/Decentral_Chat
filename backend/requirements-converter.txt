@@ -1,0 +1,84 @@
+# ========================================
+# File Converter Enhanced Dependencies
+# Production-ready file conversion support
+# ========================================
+
+# Core Image Processing
+Pillow>=10.0.0
+
+# PDF Processing
+PyPDF2>=3.0.0
+pdf2docx>=0.5.6  # CRITICAL: For PDF to DOCX with images support
+
+# Document Processing
+python-docx>=1.0.0
+python-pptx>=0.6.21
+openpyxl>=3.1.0
+
+# DOCX to PDF conversion (Windows only, requires MS Word)
+docx2pdf>=0.1.8  # Alternative: Use LibreOffice (recommended)
+
+# HTML Processing
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Markdown Processing
+markdown>=3.5.0
+
+# Video/Audio Processing (requires FFmpeg installed separately)
+# Note: FFmpeg must be installed separately and added to PATH
+# Download from: https://ffmpeg.org/download.html
+
+# ========================================
+# CRITICAL: LibreOffice Installation (RECOMMENDED)
+# ========================================
+# LibreOffice provides the BEST conversion quality with images & formatting
+# 
+# Install LibreOffice:
+# 1. Download from: https://www.libreoffice.org/download/
+# 2. Install (all platforms: Windows, Mac, Linux)
+# 3. Verify installation:
+#    - Windows: soffice --version
+#    - Mac/Linux: libreoffice --version
+#
+# LibreOffice enables:
+# ✅ PDF ↔ DOCX with images preserved
+# ✅ PPT/PPTX → PDF with full formatting
+# ✅ All document formats with proper rendering
+#
+# ========================================
+# Installation Steps:
+# ========================================
+# 1. Install Python dependencies:
+#    pip install -r requirements-converter.txt
+#
+# 2. Install LibreOffice (RECOMMENDED):
+#    https://www.libreoffice.org/download/
+#
+# 3. Install FFmpeg (for media files):
+#    - Windows: https://ffmpeg.org/download.html
+#    - Mac: brew install ffmpeg
+#    - Linux: apt-get install ffmpeg
+#    - Add to system PATH and verify: ffmpeg -version
+#
+# ========================================
+# Conversion Capabilities:
+# ========================================
+# WITH LibreOffice + pdf2docx:
+#   • PDF ↔ DOCX: Full formatting, images, tables
+#   • PPT → PDF: All slides with images
+#   • All Office formats: Best quality
+#
+# WITHOUT LibreOffice (text-only fallback):
+#   • PDF → DOCX: Text only, no images
+#   • PPT → PDF: Text only, no slides layout
+#   • Lower quality conversions
+#
+# ========================================
+#    pytesseract>=0.3.10
+#    Tesseract-OCR (install separately)
+#
+# For advanced PDF features:
+#    pdfplumber>=0.10.0
+#    pypdf>=3.17.0
+# ========================================
