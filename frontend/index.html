@@ -6229,6 +6229,17 @@
                     })));
                 }
                 
+                // 🔒 Proactively set up encryption keys for all direct chats
+                if (CryptoEngine._ready) {
+                    chats.forEach(chat => {
+                        if (chat.type === 'direct' && chat.other_user_id && !CryptoEngine.hasKey(chat.id)) {
+                            CryptoEngine.setupChatKey(chat.id, chat.other_user_id).catch(() => {});
+                        } else if (chat.type === 'group' && chat.member_ids && !CryptoEngine.hasKey(chat.id)) {
+                            CryptoEngine.setupGroupChatKey(chat.id, chat.member_ids).catch(() => {});
+                        }
+                    });
+                }
+                
                 renderChats();
                 
             } catch (error) {
@@ -6816,10 +6827,20 @@
             return messageEl;
         }
 
-        function handleNewMessage(data) {
+        async function handleNewMessage(data) {
             if (!data || !data.message) return;
 
             const msg = data.message;
+
+            // 🔒 Set up encryption key for incoming messages
+            if (CryptoEngine._ready && data.chat_id) {
+                const chat = chats.find(c => c.id === data.chat_id);
+                if (chat && chat.type === 'direct' && chat.other_user_id && !CryptoEngine.hasKey(chat.id)) {
+                    await CryptoEngine.setupChatKey(chat.id, chat.other_user_id).catch(() => {});
+                } else if (chat && chat.type === 'group' && chat.member_ids && !CryptoEngine.hasKey(chat.id)) {
+                    await CryptoEngine.setupGroupChatKey(chat.id, chat.member_ids).catch(() => {});
+                }
+            }
 
             // ⭐ Ensure reply_to_data always exists in the message object
             const messageObj = {
@@ -6852,8 +6873,8 @@
                 }
             }
 
-            // Update chat list
-            loadChats();
+            // Update chat list (and set up keys for new chats)
+            await loadChats();
 
             // Desktop notification for other chats
             if (!activeChat || data.chat_id !== activeChat.id) {

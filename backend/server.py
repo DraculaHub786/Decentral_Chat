@@ -3004,7 +3004,8 @@ class DecentralChatServer:
                         "name": chat_data.get('name'),
                         "description": chat_data.get('description'),
                         "avatar_url": chat_data.get('avatar_url'),
-                        "member_count": len(member_ids)
+                        "member_count": len(member_ids),
+                        "member_ids": list(member_ids)  # 🔒 Include member IDs for E2E group encryption
                     })
 
                 chats.append(chat_info)
