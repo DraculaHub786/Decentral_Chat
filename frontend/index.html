@@ -4039,7 +4039,7 @@
                     <div class="chat-header">
                         <div class="chat-header-left">
                             <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
-                            <div class="avatar" id="activeChatAvatar">👤</div>
+                            <div class="avatar" id="activeChatAvatar" style="cursor: pointer;" onclick="openChatAvatarViewer()">👤</div>
                             <div>
                                 <h3 id="activeChatName">Contact Name</h3>
                                 <p id="activeChatStatus" style="font-size: 12px; color: #888;">online</p>
@@ -4110,12 +4110,27 @@
                     <div class="message-input-container">
                         <div class="message-input-wrapper">
                             <div class="input-actions">
-                                <button class="icon-btn file-btn" onclick="triggerFileUpload()" title="Attach File">
+                                <!-- MOBILE FIX: Standard approach - label wrapping input -->
+                                <label class="icon-btn file-btn" title="Attach File" style="cursor: pointer; position: relative;">
                                     📎
-                                </button>
-                                <button class="icon-btn image-btn" onclick="triggerImageUpload()" title="Send Image">
+                                    <input 
+                                        type="file" 
+                                        id="fileInput"
+                                        multiple
+                                        accept="*/*"
+                                        style="position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer;"
+                                    >
+                                </label>
+                                <label class="icon-btn image-btn" title="Send Image" style="cursor: pointer; position: relative;">
                                     🖼️
-                                </button>
+                                    <input 
+                                        type="file" 
+                                        id="imageInput"
+                                        multiple
+                                        accept="image/*,video/*"
+                                        style="position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer;"
+                                    >
+                                </label>
                                 <button class="icon-btn" onclick="toggleEmojiPicker()" title="Emoji" id="emojiBtn">😊</button>
 
                             </div>
@@ -4155,33 +4170,9 @@
         </div>
     </div>
 
-    <!-- Hidden File Inputs - UPDATED FOR MOBILE -->
-    <input 
-        type="file" 
-        id="fileInput"
-        multiple
-        accept="*/*"
-        style="position: absolute; opacity: 0; pointer-events: auto; width: 1px; height: 1px; z-index: 9999;"
-    >
-    <input 
-        type="file" 
-        id="imageInput"
-        multiple
-        accept="image/*,video/*"
-        style="position: absolute; opacity: 0; pointer-events: auto; width: 1px; height: 1px; z-index: 9999;"
-    >
-    <input 
-        type="file" 
-        id="videoInput"
-        accept="video/*"
-        style="position: absolute; opacity: 0; pointer-events: auto; width: 1px; height: 1px; z-index: 9999;"
-    >
-    <input 
-        type="file" 
-        id="audioInput"
-        accept="audio/*"
-        style="position: absolute; opacity: 0; pointer-events: auto; width: 1px; height: 1px; z-index: 9999;"
-    >
+    <!-- Hidden inputs for video/audio (rarely used directly) -->
+    <input type="file" id="videoInput" accept="video/*" style="display:none;" onchange="handleFileSelect(event)">
+    <input type="file" id="audioInput" accept="audio/*" style="display:none;" onchange="handleFileSelect(event)">
 
     <!-- Call Overlay -->
     <div id="callOverlay" class="call-overlay">
@@ -6198,6 +6189,57 @@
 
         // ========== Chats ==========
         
+        /**
+         * Format last message for display in contact list
+         * Decrypts encrypted messages and shows appropriate labels for different message types
+         */
+        async function formatLastMessagePreview(chat) {
+            // ✅ FIRST check message type - even if content is empty, show type-based label
+            const messageType = chat.last_message_type || 'text';
+            
+            // Show appropriate label for non-text message types
+            if (messageType === 'voice' || messageType === 'audio') {
+                return '🎵 Audio';
+            } else if (messageType === 'file') {
+                return '📎 File';
+            } else if (messageType === 'image') {
+                return '📷 Image';
+            } else if (messageType === 'video') {
+                return '🎥 Video';
+            }
+            
+            // For text messages, check if content exists
+            if (!chat.last_message) {
+                return 'No messages yet';
+            }
+            
+            // For text messages, try to decrypt
+            let displayText = chat.last_message;
+            
+            // Try to decrypt if encryption is available
+            if (CryptoEngine._ready && chat.id && CryptoEngine.hasKey(chat.id)) {
+                try {
+                    const decrypted = await CryptoEngine.decryptText(chat.id, displayText);
+                    if (decrypted && decrypted !== displayText) {
+                        displayText = decrypted;
+                    }
+                } catch (error) {
+                    // If decryption fails, show the raw message
+                    console.warn('Preview decrypt failed for chat', chat.id, error);
+                }
+            } else if (displayText.length > 30 && /^[A-Za-z0-9+/=]+$/.test(displayText)) {
+                // No key available but looks like encrypted data
+                displayText = '🔒 Encrypted message';
+            }
+            
+            // Truncate if too long
+            if (displayText.length > 50) {
+                displayText = displayText.substring(0, 47) + '...';
+            }
+            
+            return displayText;
+        }
+        
         async function loadChats() {
             const container = document.getElementById('contactsList');
             
@@ -6252,7 +6294,7 @@
             }
         }
 
-        function renderChats() {
+        async function renderChats() {
             const container = document.getElementById('contactsList');
             container.innerHTML = '';
             
@@ -6269,7 +6311,8 @@
                 return;
             }
             
-            chats.forEach((chat, index) => {
+            // Render all chats with formatted last messages
+            for (const [index, chat] of chats.entries()) {
                 try {
                     const chatEl = document.createElement('div');
                     chatEl.className = 'contact-item' + (activeChat?.id === chat.id ? ' active' : '');
@@ -6287,6 +6330,9 @@
                         avatarContent = chat.name ? chat.name[0].toUpperCase() : '?';
                     }
                     
+                    // Format the last message (decrypt if needed)
+                    const formattedLastMessage = await formatLastMessagePreview(chat);
+                    
                     chatEl.innerHTML = `
                         <div class="contact-avatar">
                             ${avatarContent}
@@ -6294,7 +6340,7 @@
                         </div>
                         <div class="contact-info">
                             <div class="contact-name">${escapeHtml(chat.name || 'Unknown')}</div>
-                            <div class="contact-last-message">${escapeHtml(chat.last_message || 'No messages yet')}</div>
+                            <div class="contact-last-message">${escapeHtml(formattedLastMessage)}</div>
                         </div>
                         ${chat.unread_count > 0 ? `<div class="unread-badge">${chat.unread_count}</div>` : ''}
                     `;
@@ -6305,7 +6351,7 @@
                 } catch (error) {
                     console.error('❌ Error rendering chat:', chat.id, error);
                 }
-            });
+            }
         }
 
         async function openNewChat() {
@@ -6698,29 +6744,29 @@
                     }
                     
                     if (att.type === 'image') {
-                        // Fix URL construction - URLs from backend already include /api/uploads/
-                        const imageUrl   = att.url.startsWith('http') ? att.url : att.url;
+                        // ✅ Fix URL construction - prepend server URL if not absolute
+                        const imageUrl   = att.url.startsWith('http') ? att.url : `${window.location.origin}${att.url}`;
                         const thumbUrl   = att.thumbnail_url
-                            ? (att.thumbnail_url.startsWith('http') ? att.thumbnail_url : att.thumbnail_url)
+                            ? (att.thumbnail_url.startsWith('http') ? att.thumbnail_url : `${window.location.origin}${att.thumbnail_url}`)
                             : imageUrl;
 
                         attachmentsHtml += `
                             <div class="message-attachment">
                             <img 
-                                src="${thumbUrl}"
+                                src="${imageUrl}"
                                 data-full="${imageUrl}"
                                 alt="${escapeHtml(att.filename || 'Image')}"
                                 class="chat-thumb-img"
                                 loading="lazy"
                                 decoding="async"
                                 onclick="openImageViewer('${imageUrl}', '${escapeHtml(att.filename || 'Image')}')"
-                                style="cursor:pointer;max-width:300px;max-height:300px;border-radius:8px;transition:filter 0.4s ease;filter:${thumbUrl !== imageUrl ? 'blur(4px)' : 'none'};"
+                                style="cursor:pointer;max-width:300px;max-height:300px;border-radius:8px;"
                                 onerror="this.parentElement.innerHTML='<div style=\\'padding:10px;background:rgba(255,0,0,0.1);border-radius:8px;color:#ff6666;text-align:center\\'>❌ Image not available<br><small style=\\'color:#888\\'>${escapeHtml(att.filename || 'Unknown')}</small></div>'"
                             >
                             </div>
                         `;
                     } else if (att.type === 'video') {
-                        const videoUrl = att.url.startsWith('http') ? att.url : att.url;
+                        const videoUrl = att.url.startsWith('http') ? att.url : `${window.location.origin}${att.url}`;
                         attachmentsHtml += `
                             <div class="message-attachment">
                                 <video 
@@ -6734,7 +6780,7 @@
                     } else if (message.message_type === 'voice' || att.type === 'audio') {
                         const duration = att.duration || '0:00';
                         const audioId = `audio_${message.id}_${att.id}`;
-                        const audioUrl = att.url.startsWith('http') ? att.url : att.url;
+                        const audioUrl = att.url.startsWith('http') ? att.url : `${window.location.origin}${att.url}`;
                         
                         attachmentsHtml += `
                             <div class="voice-message">
@@ -6874,8 +6920,12 @@
                 }
             }
 
-            // Update chat list (and set up keys for new chats)
-            await loadChats();
+            // ✅ Update chat preview in contact list immediately
+            updateChatPreviewInList(data.chat_id, {
+                last_message: data.last_message_preview || msg.content || '',
+                last_message_type: data.last_message_type || msg.message_type || 'text',
+                last_message_time: msg.created_at
+            });
 
             // Desktop notification for other chats
             if (!activeChat || data.chat_id !== activeChat.id) {
@@ -6883,6 +6933,28 @@
                     msg.sender.username,
                     msg.content || 'Sent an attachment'
                 );
+            }
+        }
+
+        // Helper function to update chat preview without reloading all chats
+        async function updateChatPreviewInList(chatId, messageInfo) {
+            try {
+                const chatIndex = chats.findIndex(c => c.id === chatId);
+                if (chatIndex !== -1) {
+                    // Update local chat data
+                    chats[chatIndex].last_message = messageInfo.last_message;
+                    chats[chatIndex].last_message_type = messageInfo.last_message_type;
+                    chats[chatIndex].last_message_time = messageInfo.last_message_time;
+                    
+                    // Move chat to top
+                    const [updatedChat] = chats.splice(chatIndex, 1);
+                    chats.unshift(updatedChat);
+                    
+                    // Re-render chat list
+                    await renderChats();
+                }
+            } catch (error) {
+                console.error('Error updating chat preview:', error);
             }
         }
 
@@ -7025,7 +7097,8 @@
                     serverId: convertData.converted_file.id,
                     name: convertData.converted_file.filename,
                     url: downloadUrl,
-                    mime: convertData.converted_file.type || ''
+                    mime: convertData.converted_file.type || '',
+                    fileType: convertData.converted_file.type || 'file'  // ✅ Store file type for message_type detection
                 };
 
                 // 4️⃣ Replace original file in selectedFiles
@@ -7151,6 +7224,7 @@
             
             try {
                 let attachmentIds = [];
+                let attachmentTypes = [];  // ✅ Store file types
                 
                 // Upload files if any
                 if (selectedFiles.length > 0) {
@@ -7160,7 +7234,9 @@
                     showNotification('Uploading', `Uploading ${selectedFiles.length} file(s)...`);
                     
                     try {
-                        attachmentIds = await uploadFiles();
+                        const uploadResult = await uploadFiles();
+                        attachmentIds = uploadResult.ids || [];
+                        attachmentTypes = uploadResult.types || [];  // ✅ Get file types
                         
                         if (attachmentIds.length === 0) {
                             throw new Error('No files were uploaded successfully');
@@ -7171,7 +7247,7 @@
                             throw new Error('Invalid file IDs received from server');
                         }
                         
-                        console.log('✅ Files uploaded successfully, IDs:', attachmentIds);
+                        console.log('✅ Files uploaded successfully, IDs:', attachmentIds, 'Types:', attachmentTypes);
                         
                         // Clear file selection
                         selectedFiles = [];
@@ -7211,12 +7287,21 @@
                         isE2eEncrypted = attachmentIds.some(id => window._encryptedFileIds.has(id));
                     }
 
+                    // ✅ Determine message type based on uploaded file types
+                    let messageType = 'text';
+                    if (attachmentIds.length > 0) {
+                        // Use first file's type, or 'file' if mixed types
+                        const firstType = attachmentTypes[0] || 'file';
+                        const allSameType = attachmentTypes.every(t => t === firstType);
+                        messageType = allSameType ? firstType : 'file';
+                    }
+
                     const messageData = {
                         type: 'message',
                         chat_id: activeChat.id,
                         content: encryptedContent,
                         encrypted: isE2eEncrypted,
-                        message_type: attachmentIds.length > 0 ? 'file' : 'text',
+                        message_type: messageType,  // ✅ Use detected type
                         attachments: attachmentIds,
                         reply_to: replyToMessageId || null
                     };
@@ -7380,73 +7465,25 @@
 
         // ========== File Uploads ==========
         function triggerFileUpload() {
-            console.log('📎 File upload triggered');
-            
+            console.log('📎 triggerFileUpload called');
             const fileInput = document.getElementById('fileInput');
             if (!fileInput) {
-                console.error('❌ fileInput not found');
-                showError('File input not available');
+                showError('File input not found');
                 return;
             }
-            
-            // ✅ MOBILE & DESKTOP: Direct click trigger
-            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-            
-            if (isMobile) {
-                console.log('📱 Mobile detected - triggering file picker');
-                // Reset value to allow selecting same file again
-                fileInput.value = '';
-                
-                // Small delay for iOS
-                setTimeout(() => {
-                    try {
-                        fileInput.click();
-                        console.log('✅ File input triggered on mobile');
-                    } catch (error) {
-                        console.error('❌ Mobile file trigger failed:', error);
-                        showError('Failed to open file picker');
-                    }
-                }, 50);
-            } else {
-                // Desktop - immediate trigger
-                fileInput.value = '';
-                fileInput.click();
-            }
+            fileInput.value = '';
+            fileInput.click();
         }
 
         function triggerImageUpload() {
-            console.log('🖼️ Image upload triggered');
-            
+            console.log('🖼️ triggerImageUpload called');
             const imageInput = document.getElementById('imageInput');
             if (!imageInput) {
-                console.error('❌ imageInput not found');
-                showError('Image input not available');
+                showError('Image input not found');
                 return;
             }
-            
-            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-            
-            if (isMobile) {
-                console.log('📱 Mobile device - opening camera/gallery picker');
-                
-                // Reset to allow re-selection
-                imageInput.value = '';
-                
-                // ✅ CRITICAL FIX: Direct trigger with proper timing
-                setTimeout(() => {
-                    try {
-                        imageInput.click();
-                        console.log('✅ Image input triggered on mobile');
-                    } catch (error) {
-                        console.error('❌ Mobile image trigger failed:', error);
-                        showError('Failed to open camera/gallery');
-                    }
-                }, 50);
-            } else {
-                // Desktop - immediate trigger
-                imageInput.value = '';
-                imageInput.click();
-            }
+            imageInput.value = '';
+            imageInput.click();
         }
 
         function resetFileInput(input) {
@@ -7898,6 +7935,7 @@
         }
         async function uploadFiles() {
             const uploadedFileIds = [];
+            const uploadedFileTypes = [];  // ✅ Track file types
             // Track which file IDs were encrypted client-side
             if (!window._encryptedFileIds) window._encryptedFileIds = new Set();
             
@@ -7908,6 +7946,7 @@
                 if (file.__converted && file.serverId) {
                     console.log(`✅ Using converted file ID: ${file.serverId} (${file.name})`);
                     uploadedFileIds.push(file.serverId);
+                    uploadedFileTypes.push(file.fileType || 'file');  // ✅ Track type
                     continue;
                 }
                 
@@ -7954,8 +7993,9 @@
                     
                     if (data.success && data.file && data.file.id) {
                         uploadedFileIds.push(data.file.id);
+                        uploadedFileTypes.push(data.file.type || 'file');  // ✅ Use 'type' from server response
                         if (_fileEncrypted) window._encryptedFileIds.add(data.file.id);
-                        console.log(`✅ File uploaded: ${file.name} -> ID: ${data.file.id}${_fileEncrypted ? ' (encrypted)' : ''}`);
+                        console.log(`✅ File uploaded: ${file.name} -> ID: ${data.file.id} (${data.file.type})${_fileEncrypted ? ' (encrypted)' : ''}`);
                         
                         // Wait for file system to sync
                         await new Promise(resolve => setTimeout(resolve, 100));
@@ -7971,7 +8011,7 @@
             }
             
             console.log(`✅ All ${uploadedFileIds.length} files uploaded successfully`);
-            return uploadedFileIds;
+            return { ids: uploadedFileIds, types: uploadedFileTypes };  // ✅ Return both IDs and types
         }
         // ========== Voice Recording ==========
         
@@ -10294,6 +10334,26 @@
             document.body.appendChild(viewer);
         }
 
+        function openChatAvatarViewer() {
+            if (!activeChat) return;
+            
+            // Get avatar URL
+            let avatarUrl = activeChat.avatar_url;
+            if (!avatarUrl) {
+                // No avatar image, just show the initial letter
+                showNotification('No Photo', 'This user has no profile picture');
+                return;
+            }
+            
+            // Construct full URL if relative
+            if (!avatarUrl.startsWith('http')) {
+                avatarUrl = `${window.location.origin}${avatarUrl.startsWith('/api') ? avatarUrl : '/api' + avatarUrl}`;
+            }
+            
+            // Open the image viewer with the profile picture
+            openImageViewer(avatarUrl, activeChat.name || 'Profile Picture');
+        }
+
         async function searchInChat() {
             if (!activeChat) return;
             
@@ -11532,20 +11592,12 @@
                     // iOS: Remove capture to allow gallery selection
                     imageInput.removeAttribute('capture');
                     
-                    // Set webkit-specific attributes for better compatibility
-                    fileInput.style.webkitTapHighlightColor = 'transparent';
-                    imageInput.style.webkitTapHighlightColor = 'transparent';
-                    
                     console.log('🍎 iOS: Optimized for gallery and camera access');
                 } else if (/Android/i.test(navigator.userAgent)) {
                     // Android: Allow both camera and gallery
                     imageInput.removeAttribute('capture'); // Let Android choose
                     console.log('🤖 Android: Optimized for flexible media selection');
                 }
-                
-                // ✅ Ensure inputs are interactive on mobile
-                fileInput.style.pointerEvents = 'auto';
-                imageInput.style.pointerEvents = 'auto';
                 
                 // ✅ Add better touch feedback
                 document.addEventListener('touchstart', function() {}, { passive: true });
@@ -14428,22 +14480,26 @@
                 console.log('🍎 iOS: removed capture to allow gallery selection');
             }
 
-            // Android: camera optional but okay to hint
+            // Android: Remove capture to allow both camera and gallery selection
             if (/Android/i.test(navigator.userAgent)) {
-                imageInput.setAttribute('capture', 'environment');
+                imageInput.removeAttribute('capture');  // Don't force camera
                 imageInput.setAttribute('accept', 'image/*,video/*');
-                console.log('🤖 Android: set capture=environment as hint');
+                console.log('🤖 Android: removed capture to allow gallery selection');
             }
 
-            // ✅ File input handlers are already attached in DOMContentLoaded
-            // Skipping duplicate attachment to prevent double-firing
-            console.log('⚠️ Skipping duplicate file input listener - already attached in DOMContentLoaded');
+            console.log('✅ Mobile file inputs configured');
         }
 
 
-        // Prevent zoom on double-tap (mobile)
+        // Prevent zoom on double-tap (mobile) - FIXED: exclude file inputs
         let lastTouchEnd = 0;
         document.addEventListener('touchend', (e) => {
+            // ✅ CRITICAL: Don't prevent default on file inputs or their labels
+            // This was blocking mobile file selection from working
+            if (e.target.tagName === 'INPUT' && e.target.type === 'file') return;
+            if (e.target.closest('label.file-btn, label.image-btn, .input-actions')) return;
+            if (e.target.closest('input[type="file"]')) return;
+            
             const now = Date.now();
             if (now - lastTouchEnd <= 300) {
                 e.preventDefault();
@@ -14848,16 +14904,10 @@
             }
         }
 
-        // Prevent double-tap zoom
+        // Prevent double-tap zoom - FIXED: exclude file inputs
         function preventMobileZoom() {
-            let lastTouchEnd = 0;
-            document.addEventListener('touchend', (e) => {
-                const now = Date.now();
-                if (now - lastTouchEnd <= 300) {
-                    e.preventDefault();
-                }
-                lastTouchEnd = now;
-            }, false);
+            // Note: Main double-tap prevention is already set up above
+            // This function now only handles pinch zoom
             
             // Prevent pinch zoom
             document.addEventListener('gesturestart', (e) => {
@@ -14890,20 +14940,8 @@
             }
         });
 
-        // Update file input handling for mobile
-        const originalHandleFileSelect = typeof handleFileSelect !== 'undefined' ? handleFileSelect : function() {};
-        handleFileSelect = async function(event) {
-            const files = Array.from(event.target.files);
-            
-            if (files.length === 0) return;
-            
-            // Show immediate feedback on mobile
-            if (window.innerWidth <= 768) {
-                showNotification('Processing', `Preparing ${files.length} file(s)...`);
-            }
-            
-            await originalHandleFileSelect(event);
-        };
+        // ✅ MOBILE DEBUG: Handled in main DOMContentLoaded block
+        // Duplicate handlers removed to prevent double-firing
 
         // Smooth scroll to bottom on mobile
         function scrollToBottomSmooth() {

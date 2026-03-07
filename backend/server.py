@@ -432,7 +432,7 @@ class DecentralChatServer:
                 )
 
             # Check if username already exists in Redis
-            existing_user_id = await redis_client.hget("username_map", username)
+            existing_user_id = await redis_client.hget("username_map", username.lower())
             if existing_user_id:
                 logger.warning(f"⚠️ Username '{username}' already exists in Redis (user_id: {existing_user_id})")
                 
@@ -442,7 +442,7 @@ class DecentralChatServer:
                 if not user_data_check:
                     logger.error(f"🔧 GHOST ENTRY DETECTED: username_map has '{username}' -> '{existing_user_id}' but user data doesn't exist!")
                     logger.info(f"🔧 Cleaning up ghost entry...")
-                    await redis_client.hdel("username_map", username)
+                    await redis_client.hdel("username_map", username.lower())
                     logger.info(f"✅ Ghost entry cleaned, proceeding with registration")
                     # Continue to Firestore check below
                 else:
@@ -469,7 +469,7 @@ class DecentralChatServer:
 
             # Check if email already exists
             if email:
-                existing_email_user = await redis_client.hget("email_map", email)
+                existing_email_user = await redis_client.hget("email_map", email.lower())
                 if existing_email_user:
                     return web.json_response(
                         {"error": "Email already exists"},
@@ -509,10 +509,12 @@ class DecentralChatServer:
             # Save to Redis with ALL mappings
             await redis_client.hset(f"user:{user_id}", mapping=user_data)
             await redis_client.sadd("users:all", user_id)
-            await redis_client.hset("username_map", username, user_id)
+            # Store username in lowercase for case-insensitive lookups
+            await redis_client.hset("username_map", username.lower(), user_id)
             
             if email:
-                await redis_client.hset("email_map", email, user_id)
+                # Store email in lowercase for case-insensitive lookups
+                await redis_client.hset("email_map", email.lower(), user_id)
             
             if phone:
                 await redis_client.hset("phone_map", phone, user_id)
@@ -612,17 +614,17 @@ class DecentralChatServer:
                     status=400
                 )
 
-            # ✅ CRITICAL FIX: Try ALL possible lookups
+            # ✅ CRITICAL FIX: Try ALL possible lookups with case-insensitive search
             user_id = None
             user_data = None
 
-            # Step 1: Try Redis username lookup
-            user_id = await redis_client.hget("username_map", identifier)
+            # Step 1: Try Redis username lookup (case-insensitive)
+            user_id = await redis_client.hget("username_map", identifier.lower())
             logger.info(f"🔍 Redis username_map check: {user_id}")
             
-            # Step 2: Try Redis email lookup
+            # Step 2: Try Redis email lookup (case-insensitive)
             if not user_id and '@' in identifier:
-                user_id = await redis_client.hget("email_map", identifier)
+                user_id = await redis_client.hget("email_map", identifier.lower())
                 logger.info(f"🔍 Redis email_map check: {user_id}")
             
             # Step 3: Try Redis phone lookup
@@ -1721,16 +1723,30 @@ class DecentralChatServer:
             data = await request.json()
             identifier = data.get('identifier', '').strip()
 
-            # Find user
+            # Find user - try case-insensitive username search first
             contact_id = await redis_client.hget("username_map", identifier)
+            
+            # If not found, try lowercase version for case-insensitive search
+            if not contact_id:
+                contact_id = await redis_client.hget("username_map", identifier.lower())
+            
+            # If still not found and looks like email, search email map
             if not contact_id and '@' in identifier:
                 contact_id = await redis_client.hget("email_map", identifier)
+                if not contact_id:
+                    contact_id = await redis_client.hget("email_map", identifier.lower())
 
             if not contact_id:
-                return web.json_response({"error": "User not found"}, status=404)
+                return web.json_response({"error": "User not found", "success": False}, status=404)
 
             if contact_id == user_id:
-                return web.json_response({"error": "Cannot add yourself"}, status=400)
+                return web.json_response({"error": "Cannot add yourself", "success": False}, status=400)
+            
+            # Check if contact already exists
+            is_already_contact = await redis_client.sismember(f"user_contacts:{user_id}", contact_id)
+            if is_already_contact:
+                logger.info(f"ℹ️ Contact already exists: {user_id} -> {contact_id}")
+                return web.json_response({"success": True, "message": "Contact already added"})
 
             # Add to contacts
             await redis_client.sadd(f"user_contacts:{user_id}", contact_id)
@@ -2969,12 +2985,14 @@ class DecentralChatServer:
                 last_msg_ids = await redis_client.lrange(f"chat_messages:{chat_id}", 0, 0)
                 last_message = ""
                 last_message_time = None
+                last_message_type = "text"
 
                 if last_msg_ids:
                     last_msg_data = await redis_client.hgetall(f"message:{last_msg_ids[0]}")
                     if last_msg_data:
                         last_message = last_msg_data.get('content', '')[:50]
                         last_message_time = last_msg_data.get('created_at')
+                        last_message_type = last_msg_data.get('message_type', 'text')
 
                 # Get members
                 member_ids = await redis_client.smembers(f"chat_members:{chat_id}")
@@ -2984,6 +3002,7 @@ class DecentralChatServer:
                     "type": chat_data.get('type'),
                     "last_message": last_message,
                     "last_message_time": last_message_time,
+                    "last_message_type": last_message_type,
                     "unread_count": 0
                 }
 
@@ -3776,6 +3795,14 @@ class DecentralChatServer:
         await redis_client.lpush(f"chat_messages:{chat_id}", message_id)
         await redis_client.ltrim(f"chat_messages:{chat_id}", 0, 999)
 
+        # ✅ Update chat's last_message for quick preview in contact list
+        preview_content = content[:50] if message_type == 'text' else ''
+        await redis_client.hset(f"chat:{chat_id}", mapping={
+            "last_message": preview_content,
+            "last_message_type": message_type,
+            "last_message_time": message_data["created_at"]
+        })
+        
         await self.broadcast_message(chat_id, message_id, sender_id)
 
         return message_id
@@ -3904,7 +3931,9 @@ class DecentralChatServer:
                         "username": sender_data.get('username'),
                         "avatar_url": sender_data.get('avatar_url')
                     }
-                }
+                },
+                "last_message_type": msg_data.get('message_type'),  # ✅ Include for chat list preview
+                "last_message_preview": msg_data.get('content', '')[:50] if msg_data.get('message_type') == 'text' else ''
             }
 
             logger.info(f"📢 Broadcasting to {len(allowed_recipients)}/{len(member_ids)} members")
@@ -4536,10 +4565,13 @@ class DecentralChatServer:
             img = Image.open(file_path)
             img.thumbnail((300, 300))
             
-            thumbnail_path = UPLOAD_DIR / 'thumbnails' / f"{file_id}_thumb.jpg"
+            thumbnail_dir = UPLOAD_DIR / 'thumbnails'
+            thumbnail_dir.mkdir(parents=True, exist_ok=True)
+            
+            thumbnail_path = thumbnail_dir / f"{file_id}_thumb.jpg"
             img.save(thumbnail_path, "JPEG")
             
-            return f"/uploads/thumbnails/{file_id}_thumb.jpg"
+            return f"/api/uploads/thumbnails/{file_id}_thumb.jpg"
         except Exception as e:
             logger.error(f"Thumbnail generation error: {e}")
             return None
