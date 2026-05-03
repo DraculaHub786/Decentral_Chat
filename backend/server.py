@@ -9,9 +9,7 @@ load_dotenv()
 import os
 print("=" * 70)
 print("🔍 ENVIRONMENT VARIABLES CHECK:")
-print(f"TWILIO_ACCOUNT_SID: {os.getenv('TWILIO_ACCOUNT_SID', 'NOT SET')[:10]}...")
-print(f"TWILIO_AUTH_TOKEN: {os.getenv('TWILIO_AUTH_TOKEN', 'NOT SET')[:10]}...")
-print(f"TWILIO_PHONE_NUMBER: {os.getenv('TWILIO_PHONE_NUMBER', 'NOT SET')}")
+print(f"TWILIO_CONFIGURED: {bool(os.getenv('TWILIO_ACCOUNT_SID') and os.getenv('TWILIO_AUTH_TOKEN') and os.getenv('TWILIO_PHONE_NUMBER'))}")
 print(f"Current working directory: {os.getcwd()}")
 print(f".env file exists: {os.path.exists('.env')}")
 print("=" * 70)
@@ -1296,7 +1294,7 @@ class DecentralChatServer:
                 # Update Firestore
                 if self.db:
                     try:
-                        self.db.collection('users').document(user_id).update(updates)
+                        self.db.collection('users').document(user_id).set(updates, merge=True)
                         logger.info(f"✅ User {user_id} profile updated in Firestore")
                     except Exception as fb_err:
                         logger.error(f"Firestore profile update failed: {fb_err}")
@@ -1406,7 +1404,7 @@ class DecentralChatServer:
             # Update Firestore
             if self.db:
                 try:
-                    self.db.collection('users').document(user_id).update({'avatar_url': avatar_url})
+                    self.db.collection('users').document(user_id).set({'avatar_url': avatar_url}, merge=True)
                 except Exception as fb_err:
                     logger.error(f"Firestore avatar update: {fb_err}")
 
@@ -1453,7 +1451,7 @@ class DecentralChatServer:
             # Update Firestore
             if self.db:
                 try:
-                    self.db.collection('users').document(user_id).update({'email': new_email})
+                    self.db.collection('users').document(user_id).set({'email': new_email}, merge=True)
                 except Exception as fb_err:
                     logger.error(f"Firestore email update: {fb_err}")
 
@@ -1506,10 +1504,10 @@ class DecentralChatServer:
                 # Update Firestore
                 if self.db:
                     try:
-                        self.db.collection('users').document(user_id).update({
+                        self.db.collection('users').document(user_id).set({
                             'phone': new_phone,
                             'phone_verified': True
-                        })
+                        }, merge=True)
                     except Exception as fb_err:
                         logger.error(f"Firestore phone update: {fb_err}")
 
@@ -2952,7 +2950,7 @@ class DecentralChatServer:
                             except:
                                 pass
                         
-                        self.db.collection('users').document(user_id).update(update_data)
+                        self.db.collection('users').document(user_id).set(update_data, merge=True)
                         sync_count += 1
                         
                     except Exception as e:
@@ -6105,11 +6103,6 @@ class DecentralChatServer:
             logger.info(f"🔍 TWILIO_AUTH_TOKEN exists: {bool(TWILIO_AUTH_TOKEN)}")
             logger.info(f"🔍 TWILIO_PHONE_NUMBER exists: {bool(TWILIO_PHONE_NUMBER)}")
             
-            if TWILIO_ACCOUNT_SID:
-                logger.info(f"🔍 TWILIO_ACCOUNT_SID starts with: {TWILIO_ACCOUNT_SID[:5]}...")
-            if TWILIO_PHONE_NUMBER:
-                logger.info(f"🔍 TWILIO_PHONE_NUMBER: {TWILIO_PHONE_NUMBER}")
-            
             if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER:
                 try:
                     from twilio.rest import Client
@@ -6204,10 +6197,10 @@ class DecentralChatServer:
 
             if self.db:
                 try:
-                    self.db.collection('users').document(user_id).update({
+                    self.db.collection('users').document(user_id).set({
                         'phone': phone,
                         'phone_verified': True
-                    })
+                    }, merge=True)
                 except Exception as fb_err:
                     logger.error(f"Firestore update error: {fb_err}")
 
@@ -6251,7 +6244,7 @@ class DecentralChatServer:
                 
                 if self.db:
                     try:
-                        self.db.collection('users').document(user_id).update(updates)
+                        self.db.collection('users').document(user_id).set(updates, merge=True)
                     except Exception as fb_err:
                         logger.error(f"Firestore update: {fb_err}")
 
@@ -6302,7 +6295,7 @@ class DecentralChatServer:
 
             if self.db:
                 try:
-                    self.db.collection('users').document(user_id).update({'settings': settings})
+                    self.db.collection('users').document(user_id).set({'settings': settings}, merge=True)
                 except Exception as fb_err:
                     logger.error(f"Firestore update: {fb_err}")
 

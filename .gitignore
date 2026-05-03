@@ -35,6 +35,9 @@ backend/firebase-config.json
 # Logs
 *.log
 
+# Generated converter test artifacts
+backend/test_conversions/
+
 # OS
 .DS_Store
 Thumbs.db
