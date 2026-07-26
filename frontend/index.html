@@ -7,7 +7,9 @@
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <script src="https://accounts.google.com/gsi/client" async defer onload="initializeGoogleSignIn()"></script>
+    <script src="https://accounts.google.com/gsi/client" async defer onload="initializeGoogleSignIn()">
+
+</script>
     <title>DecentralChat - Secure Messaging Platform</title>
 </head>
 <style>
@@ -676,6 +678,20 @@
 
     .icon-btn:active {
         transform: translateY(0) scale(1);
+    }
+
+    .user-menu-btn {
+        margin-left: auto;
+        flex-shrink: 0;
+        width: 46px;
+        height: 46px;
+        min-width: 46px;
+        min-height: 46px;
+        padding: 0;
+        font-size: 24px;
+        line-height: 1;
+        font-weight: 700;
+        align-self: center;
     }
 
     .emoji-picker {
@@ -4171,6 +4187,10 @@
 </style>
 
 <body>
+
+<!-- Toast Notification Container (always visible, works on all screens including mobile) -->
+<div id="toastContainer" style="position:fixed;bottom:100px;left:50%;transform:translateX(-50%);z-index:99999;display:flex;flex-direction:column;align-items:center;gap:8px;pointer-events:none;max-width:90%;width:auto;transition:all 0.3s ease;"></div>
+
     <!--Connection Status-->
     <div id="connectionStatus" class="connection-status">
         <span id="statusIcon">●</span>
@@ -4262,7 +4282,7 @@
                             <h3 id="currentUsername">User</h3>
                             <p class="user-role" id="userRole">User</p>
                         </div>
-                        <button class="icon-btn" onclick="showUserMenu()" style="margin-left: auto;" title="Menu">
+                        <button class="icon-btn user-menu-btn" onclick="showUserMenu()" title="Menu" aria-label="Open user menu">
                             ⋮
                         </button>
                     </div>
@@ -5577,11 +5597,21 @@
             loader.style.display = loading ? 'inline-block' : 'none';
         }
         function showError(message) {
-            const errorEl = document.getElementById('errorMessage');
+        console.error('Error:', message);
+        // Show in UI login error div (if visible)
+        const errorEl = document.getElementById('errorMessage');
+        if (errorEl && errorEl.offsetParent !== null) {
             errorEl.textContent = message;
             errorEl.style.display = 'block';
             setTimeout(() => errorEl.style.display = 'none', 5000);
         }
+        // ALWAYS show toast notification (works on all screens)
+        if (typeof showToast === 'function') showToast(message, 'error');
+        // Also show as browser notification if available
+        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            new Notification('Error', { body: message, icon: '/favicon.ico' });
+        }
+    }
 
         function showSuccess(message) {
             const successEl = document.getElementById('successMessage');
@@ -10344,12 +10374,18 @@
             }
         }
         function showNotification(title, body) {
-            if (Notification.permission === 'granted') {
-                new Notification(title, {
-                    body: body,
-                    icon: '/favicon.ico',
-                    badge: '/favicon.ico'
-                });
+            // ALWAYS show toast regardless of notification permission
+            showToast(body || title, 'info');
+            
+            // Also try browser notification if permitted
+            if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+                try {
+                    new Notification(title, {
+                        body: body || title,
+                        icon: '/favicon.ico',
+                        badge: '/favicon.ico'
+                    });
+                } catch(e) {}
             }
         }
         // ========== Utilities ==========
@@ -13337,19 +13373,20 @@
         function showError(message) {
             console.error('Error:', message);
 
-            // Show in UI
+            // Show in UI login error div (if visible)
             const errorEl = document.getElementById('errorMessage');
-            if (errorEl) {
+            if (errorEl && errorEl.offsetParent !== null) {
                 errorEl.textContent = message;
                 errorEl.style.display = 'block';
                 setTimeout(() => errorEl.style.display = 'none', 5000);
             }
 
-            // Also show as notification if available
-            if (typeof showNotification === 'function') {
+            // ALWAYS show toast notification (works on all screens)
+            showToast(message, 'error');
+
+            // Also show as browser notification if available
+            if (typeof showNotification === 'function' && Notification.permission === 'granted') {
                 showNotification('Error', message);
-            } else {
-                alert('Error: ' + message);
             }
         }
 
@@ -15274,7 +15311,7 @@
         }
 
         // Update toggleSidebar to handle mobile
-        const originalToggleSidebar = typeof toggleSidebar !== 'undefined' ? toggleSidebar : function () { };
+        const originalToggleSidebar = typeof window.toggleSidebar !== 'undefined' ? window.toggleSidebar : function () { };
         toggleSidebar = function () {
             if (window.innerWidth <= 768) {
                 if (document.getElementById('sidebar').classList.contains('show')) {
@@ -15352,7 +15389,7 @@
         }
 
         // Update selectChat to close sidebar on mobile
-        const originalSelectChat = typeof selectChat !== 'undefined' ? selectChat : function () { };
+        const originalSelectChat = typeof window.selectChat !== 'undefined' ? window.selectChat : function () { };
         selectChat = async function (chat) {
             await originalSelectChat(chat);
 
@@ -15379,7 +15416,7 @@
         }
 
         // Call after sending message
-        const originalSendMessage = typeof sendMessage !== 'undefined' ? sendMessage : function () { };
+        const originalSendMessage = typeof window.sendMessage !== 'undefined' ? window.sendMessage : function () { };
         sendMessage = async function () {
             await originalSendMessage();
             setTimeout(scrollToBottomSmooth, 100);
@@ -15594,7 +15631,46 @@
         })();
 
         console.log('✅ Download button feature loaded');
-    </script>
+    
+        // ===== TOAST NOTIFICATION SYSTEM =====
+        // Always visible on all screens - independent of login state and notification permissions
+        function showToast(message, type) {
+            if (!message) return;
+            const container = document.getElementById('toastContainer');
+            if (!container) return;
+            
+            const toast = document.createElement('div');
+            const icon = type === 'error' ? '❌' : type === 'success' ? '✅' : 'ℹ️';
+            const bgColor = type === 'error' 
+                ? 'linear-gradient(135deg, rgba(239,68,68,0.95), rgba(200,50,50,0.95))' 
+                : type === 'success' 
+                    ? 'linear-gradient(135deg, rgba(52,211,153,0.95), rgba(5,150,105,0.95))'
+                    : 'linear-gradient(135deg, rgba(96,165,250,0.95), rgba(37,99,235,0.95))';
+            
+            toast.style.cssText = `pointer-events:auto;padding:12px 20px;border-radius:12px;background:${bgColor};backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.15);box-shadow:0 8px 32px rgba(0,0,0,0.5);color:#fff;font-size:14px;font-weight:600;display:flex;align-items:center;gap:10px;min-width:200px;max-width:400px;text-align:left;animation:toastSlideIn 0.35s cubic-bezier(0.16,1,0.3,1);word-break:break-word;line-height:1.4;`;
+            toast.innerHTML = `<span style="font-size:16px;flex-shrink:0;">${icon}</span><span>${escapeHtml(message)}</span>`;
+            
+            container.appendChild(toast);
+            
+            // Remove after 4s (6s for errors)
+            setTimeout(() => {
+                toast.style.transition = 'all 0.3s ease-out';
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateY(20px) scale(0.95)';
+                setTimeout(() => { if (toast.parentElement) toast.remove(); }, 300);
+            }, type === 'error' ? 6000 : 4000);
+        }
+        
+        // Add toast CSS animation if not present
+        if (!document.getElementById('toast-anim-style')) {
+            const style = document.createElement('style');
+            style.id = 'toast-anim-style';
+            style.textContent = `@keyframes toastSlideIn {from{opacity:0;transform:translateY(30px) scale(0.9);}to{opacity:1;transform:translateY(0) scale(1);}}`;
+            document.head.appendChild(style);
+        }
+        
+
+</script>
 </body>
 
 </html>

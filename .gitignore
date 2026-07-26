@@ -32,6 +32,7 @@ backend/firebase-config.json
 *.swo
 *~
 
+
 # Logs
 *.log
 

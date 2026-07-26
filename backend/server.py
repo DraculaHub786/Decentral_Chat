@@ -62,6 +62,63 @@ import shutil
 HAS_LIBREOFFICE = shutil.which('soffice') or shutil.which('libreoffice')
 HAS_UNOCONV = shutil.which('unoconv')
 
+# Robust FFmpeg discovery - search common locations as fallback
+FFMPEG_PATH = None
+_ffmpeg_checked = shutil.which('ffmpeg')
+if _ffmpeg_checked:
+    FFMPEG_PATH = _ffmpeg_checked
+else:
+    # Typical install paths on Windows
+    _common_ffmpeg_paths = [
+        r'C:\ffmpeg\bin\ffmpeg.exe',
+        r'C:\ProgramData\chocolatey\bin\ffmpeg.exe',
+        os.path.expanduser(r'~\scoop\apps\ffmpeg\current\bin\ffmpeg.exe'),
+        os.path.expanduser(r'~\AppData\Local\Microsoft\WinGet\Packages\ffmpeg\ffmpeg.exe'),
+    ]
+    # Search for ffmpeg.exe recursively in common parent dirs
+    _search_dirs = [
+        r'C:\Program Files',
+        r'C:\Program Files (x86)',
+        os.path.expanduser(r'~\Documents'),
+        os.path.expanduser(r'~\Downloads'),
+    ]
+    for _d in _search_dirs:
+        if os.path.isdir(_d):
+            try:
+                for _root, _dirs, _files in os.walk(_d):
+                    if 'ffmpeg.exe' in _files:
+                        FFMPEG_PATH = os.path.join(_root, 'ffmpeg.exe')
+                        break
+                    # Don't walk too deep
+                    if _root.count(os.sep) > 6:
+                        break
+            except Exception:
+                pass
+            if FFMPEG_PATH:
+                break
+    if not FFMPEG_PATH:
+        # Try with PATH including User PATH
+        _user_path = os.environ.get('PATH', '')
+        _possible = shutil.which('ffmpeg', path=_user_path)
+        if _possible:
+            FFMPEG_PATH = _possible
+    if not FFMPEG_PATH:
+        # Last resort: try to find via where.exe
+        try:
+            _r = subprocess.run(['where.exe', 'ffmpeg'], capture_output=True, text=True, timeout=5)
+            if _r.returncode == 0:
+                _line = _r.stdout.strip().split('\n')[0].strip()
+                if _line:
+                    FFMPEG_PATH = _line
+        except Exception:
+            pass
+
+if FFMPEG_PATH:
+    # Add the directory to PATH so subprocess calls find it
+    _ffmpeg_dir = str(Path(FFMPEG_PATH).parent)
+    if _ffmpeg_dir not in os.environ.get('PATH', ''):
+        os.environ['PATH'] = _ffmpeg_dir + os.pathsep + os.environ.get('PATH', '')
+
 # Configure logging early so it can be used below
 logging.basicConfig(
     level=logging.INFO,
@@ -117,8 +174,9 @@ def print_conversion_capabilities():
         logger.info("✅ Markdown: INSTALLED - Markdown conversions available")
     
     # Check ffmpeg for media conversions
-    if shutil.which('ffmpeg'):
-        logger.info("✅ FFmpeg: FOUND - Audio/video conversions available")
+    if shutil.which('ffmpeg') or FFMPEG_PATH:
+        _ffmpeg_loc = FFMPEG_PATH or shutil.which('ffmpeg')
+        logger.info(f"✅ FFmpeg: FOUND at {_ffmpeg_loc} - Audio/video conversions available")
     else:
         logger.warning("⚠️ FFmpeg: NOT FOUND - Media conversions unavailable")
     
@@ -280,6 +338,7 @@ class DecentralChatServer:
         # Root
         self.app.router.add_get('/', self.serve_frontend)  
         self.app.router.add_get('/index.html', self.serve_frontend)
+        self.app.router.add_get('/favicon.ico', self.serve_favicon)
         self.app.router.add_get('/api', self.index)
         self.app.router.add_get('/health', self.health_check)
         
@@ -926,6 +985,17 @@ class DecentralChatServer:
                 content_type='text/plain'
             )
 
+    async def serve_favicon(self, request):
+        """Serve favicon"""
+        try:
+            favicon_path = Path(__file__).parent.parent / 'frontend' / 'favicon.ico'
+            if favicon_path.exists():
+                return web.FileResponse(favicon_path)
+            return web.Response(status=204)
+        except Exception as e:
+            logger.error(f"Favicon error: {e}")
+            return web.Response(status=204)
+
     # ==================== USER MANAGEMENT ====================
     
     async def preload_critical_data_from_firestore(self):
@@ -1022,7 +1092,7 @@ class DecentralChatServer:
                 # Load messages for this chat
                 try:
                     messages_ref = self.db.collection('chats').document(chat_id).collection('messages')
-                    messages_query = messages_ref.order_by('created_at', direction=firestore.Query.DESCENDING).limit(100)
+                    messages_query = messages_ref.order_by('created_at', direction=firestore.Query.DESCENDING).limit(1000)
                     messages_docs = list(messages_query.stream())
                     
                     message_count = 0
@@ -2965,19 +3035,71 @@ class DecentralChatServer:
     # ==================== CHATS ====================
     
     async def get_chats(self, request):
-        """Get user's chats"""
+        """Get user's chats - with Firestore fallback for missing data"""
         try:
             user_id = await self.get_user_from_token(request)
             if not user_id:
                 return web.json_response({"error": "Unauthorized"}, status=401)
 
             chat_ids = await redis_client.smembers(f"user_chats:{user_id}")
+            
+            # 🔥 FIX: If Redis returns empty, try Firestore
+            if not chat_ids and self.db:
+                logger.warning(f"⚠️ Redis has no chats for user {user_id}, attempting Firestore fallback...")
+                try:
+                    # Search all chats in Firestore where user is a member
+                    chats_ref = self.db.collection('chats')
+                    # Firestore doesn't support array-contains-any with large lists well,
+                    # so scan all chats and filter
+                    all_chats = list(chats_ref.stream())
+                    for chat_doc in all_chats:
+                        chat_data_fb = chat_doc.to_dict()
+                        members = chat_data_fb.get('members', [])
+                        if user_id in members:
+                            # Found a chat for this user - restore to Redis
+                            chat_id = chat_doc.id
+                            await redis_client.sadd(f"user_chats:{user_id}", chat_id)
+                            chat_ids.add(chat_id)
+                            logger.info(f"✅ Restored chat {chat_id} to Redis for user {user_id}")
+                    
+                    if chat_ids:
+                        logger.info(f"✅ Restored {len(chat_ids)} chats from Firestore to Redis")
+                except Exception as fb_err:
+                    logger.error(f"Firestore fallback failed: {fb_err}")
+
             chats = []
 
             for chat_id in chat_ids:
                 chat_data = await redis_client.hgetall(f"chat:{chat_id}")
                 if not chat_data:
-                    continue
+                    # Try Firestore fallback for individual chat data
+                    if self.db:
+                        try:
+                            chat_doc = self.db.collection('chats').document(chat_id).get()
+                            if chat_doc.exists:
+                                fb_data = chat_doc.to_dict()
+                                chat_data = {
+                                    'id': chat_id,
+                                    'type': fb_data.get('type', 'direct'),
+                                    'name': fb_data.get('name', ''),
+                                    'description': fb_data.get('description', ''),
+                                    'avatar_url': fb_data.get('avatar_url', ''),
+                                    'created_by': fb_data.get('created_by', ''),
+                                    'created_at': str(fb_data.get('created_at', ''))
+                                }
+                                await redis_client.hset(f"chat:{chat_id}", mapping=chat_data)
+                                logger.info(f"✅ Restored chat {chat_id} data from Firestore")
+                                
+                                # Also restore members
+                                members = fb_data.get('members', [])
+                                for member_id in members:
+                                    await redis_client.sadd(f"chat_members:{chat_id}", member_id)
+                                    await redis_client.sadd(f"user_chats:{member_id}", chat_id)
+                        except Exception as fb_err:
+                            logger.warning(f"Chat Firestore fallback failed for {chat_id}: {fb_err}")
+                    
+                    if not chat_data:
+                        continue
 
                 # Get last message
                 last_msg_ids = await redis_client.lrange(f"chat_messages:{chat_id}", 0, 0)
@@ -3405,7 +3527,7 @@ class DecentralChatServer:
     # ==================== MESSAGES ====================
     
     async def get_messages(self, request):
-        """Get chat messages"""
+        """Get chat messages - with Firestore fallback for older messages"""
         try:
             user_id = await self.get_user_from_token(request)
             if not user_id:
@@ -3432,6 +3554,52 @@ class DecentralChatServer:
                 offset,
                 offset + limit - 1
             )
+
+            # ⭐ FIX: If Redis returns fewer messages than requested AND we have Firestore,
+            # try to fetch older messages from Firestore directly
+            if (not message_ids or len(message_ids) < limit) and self.db:
+                logger.warning(f"⚠️ Redis had only {len(message_ids)} messages for chat {chat_id} (requested {limit}), checking Firestore...")
+                try:
+                    messages_ref = self.db.collection('chats').document(chat_id).collection('messages')
+                    # Fetch from Firestore in descending order with offset
+                    fb_query = messages_ref.order_by('created_at', direction=firestore.Query.DESCENDING).limit(limit)
+                    fb_docs = list(fb_query.stream())
+                    
+                    if fb_docs:
+                        logger.info(f"✅ Found {len(fb_docs)} messages in Firestore for chat {chat_id}")
+                        # Store them in Redis for next time
+                        for msg_doc in reversed(fb_docs):
+                            msg_data = msg_doc.to_dict()
+                            msg_id = msg_doc.id
+                            
+                            redis_msg_data = {
+                                'id': msg_id,
+                                'chat_id': chat_id,
+                                'sender_id': msg_data.get('sender_id', ''),
+                                'content': msg_data.get('content', ''),
+                                'message_type': msg_data.get('message_type', 'text'),
+                                'encrypted': str(msg_data.get('encrypted', False)),
+                                'attachments': json.dumps(msg_data.get('attachments', [])),
+                                'reply_to': msg_data.get('reply_to', ''),
+                                'created_at': str(msg_data.get('created_at', datetime.datetime.now(datetime.UTC).isoformat())),
+                                'edited': str(msg_data.get('edited', False)),
+                                'deleted': str(msg_data.get('deleted', False))
+                            }
+                            
+                            await redis_client.hset(f"message:{msg_id}", mapping=redis_msg_data)
+                            await redis_client.lpush(f"chat_messages:{chat_id}", msg_id)
+                        
+                        await redis_client.ltrim(f"chat_messages:{chat_id}", 0, 999)
+                        
+                        # Re-fetch from Redis after restoring from Firestore
+                        message_ids = await redis_client.lrange(
+                            f"chat_messages:{chat_id}",
+                            offset,
+                            offset + limit - 1
+                        )
+                        logger.info(f"✅ Restored messages to Redis, now have {len(message_ids)} messages available")
+                except Exception as fb_err:
+                    logger.warning(f"Firestore fallback for messages failed: {fb_err}")
 
             messages = []
 
@@ -3474,6 +3642,27 @@ class DecentralChatServer:
                 attachment_ids = json.loads(msg_data.get('attachments', '[]'))
                 for att_id in attachment_ids:
                     att_meta = await redis_client.hgetall(f"file:{att_id}")
+                    
+                    # Firestore fallback for file metadata
+                    if not att_meta and self.db:
+                        try:
+                            file_doc = self.db.collection('files').document(att_id).get()
+                            if file_doc.exists:
+                                fb_data = file_doc.to_dict()
+                                att_meta = {
+                                    'id': att_id,
+                                    'filename': fb_data.get('filename', ''),
+                                    'file_type': fb_data.get('file_type', 'document'),
+                                    'size': str(fb_data.get('size', 0)),
+                                    'url': fb_data.get('url', ''),
+                                    'thumbnail_url': fb_data.get('thumbnail_url', '')
+                                }
+                                # Cache back to Redis
+                                await redis_client.hset(f"file:{att_id}", mapping=att_meta)
+                                logger.info(f"✅ Restored file {att_id} metadata from Firestore")
+                        except Exception as fb_err:
+                            logger.warning(f"Firestore file fallback failed for {att_id}: {fb_err}")
+                    
                     if att_meta:
                         attachments.append({
                             "id": att_id,
@@ -4258,6 +4447,31 @@ class DecentralChatServer:
             
             # Get file metadata
             file_meta = await redis_client.hgetall(f"file:{file_id}")
+            
+            # Firestore fallback for file metadata
+            if not file_meta and self.db:
+                try:
+                    file_doc = self.db.collection('files').document(file_id).get()
+                    if file_doc.exists:
+                        fb_data = file_doc.to_dict()
+                        file_meta = {
+                            'id': file_id,
+                            'user_id': fb_data.get('user_id', ''),
+                            'filename': fb_data.get('filename', ''),
+                            'file_type': fb_data.get('file_type', 'document'),
+                            'extension': fb_data.get('extension', ''),
+                            'size': str(fb_data.get('size', 0)),
+                            'path': fb_data.get('path', ''),
+                            'url': fb_data.get('url', ''),
+                            'thumbnail_url': fb_data.get('thumbnail_url', ''),
+                            'uploaded_at': str(fb_data.get('uploaded_at', '')),
+                        }
+                        # Cache back to Redis
+                        await redis_client.hset(f"file:{file_id}", mapping=file_meta)
+                        logger.info(f"✅ Restored file {file_id} metadata from Firestore")
+                except Exception as fb_err:
+                    logger.warning(f"Firestore file fallback failed for {file_id}: {fb_err}")
+            
             if not file_meta:
                 return web.json_response({"error": "File not found"}, status=404)
             
@@ -4314,12 +4528,12 @@ class DecentralChatServer:
                 video_exts = ['mp4', 'avi', 'mov', 'webm', 'mkv']
                 
                 # Progress tracking varies by conversion type
-                if source_ext in image_exts and target_format in image_exts:
+                if source_ext in image_exts and (target_format in image_exts or target_format == 'pdf'):
                     await redis_client.hset(conversion_id, "progress", "20")
                     result_path = self.convert_image_format(str(source_path), str(output_path), target_format)
                     await redis_client.hset(conversion_id, "progress", "90")
                     
-                elif source_ext in ['pdf', 'docx'] or target_format in ['pdf', 'docx', 'txt']:
+                elif source_ext in ['pdf', 'docx', 'txt'] or target_format in ['pdf', 'docx', 'txt']:
                     await redis_client.hset(conversion_id, "progress", "25")
                     result_path = self.convert_document_format(str(source_path), str(output_path), source_ext, target_format)
                     await redis_client.hset(conversion_id, "progress", "85")
@@ -5678,37 +5892,6 @@ class DecentralChatServer:
             logger.error(f"❌ WS message error: {e}", exc_info=True)
 
 
-    async def edit_message(self, request):
-        """Edit message"""
-        try:
-            user_id = await self.get_user_from_token(request)
-            if not user_id:
-                return web.json_response({"error": "Unauthorized"}, status=401)
-
-            message_id = request.match_info['message_id']
-            data = await request.json()
-            new_content = data.get('content', '').strip()
-
-            if not new_content:
-                return web.json_response({"error": "Content required"}, status=400)
-
-            msg_data = await redis_client.hgetall(f"message:{message_id}")
-
-            if msg_data.get('sender_id') != user_id:
-                return web.json_response({"error": "Can only edit own messages"}, status=403)
-
-            await redis_client.hset(f"message:{message_id}", mapping={
-                "content": new_content,
-                "edited": "True",
-                "edited_at": datetime.datetime.now(datetime.UTC).isoformat()
-            })
-
-            return web.json_response({"success": True})
-
-        except Exception as e:
-            logger.error(f"Edit message error: {e}")
-            return web.json_response({"error": str(e)}, status=500)
-
     async def handle_read_receipt(self, user_id: str, data: dict):
         """Handle message read receipts"""
         try:
@@ -5992,81 +6175,6 @@ class DecentralChatServer:
         except Exception as e:
             logger.error(f"Google auth error: {e}", exc_info=True)
             return web.json_response({"error": str(e)}, status=500)
-    async def cation_code(self, request):
-        """Send OTP for phone verification"""
-        try:
-            user_id = await self.get_user_from_token(request)
-            if not user_id:
-                return web.json_response({"error": "Unauthorized"}, status=401)
-
-            data = await request.json()
-            phone = data.get('phone', '').strip()
-
-            if not phone:
-                return web.json_response({"error": "Phone number required"}, status=400)
-
-            # Validate phone format (must start with +)
-            if not phone.startswith('+'):
-                return web.json_response({"error": "Phone must include country code (e.g., +1234567890)"}, status=400)
-
-            # Generate 6-digit OTP
-            otp = ''.join(random.choices(string.digits, k=6))
-            
-            # Store OTP in Redis with 10-minute expiry
-            await redis_client.setex(f"otp:{phone}", 600, otp)
-            
-            # ✅ REAL SMS SENDING - TWILIO
-            TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
-            TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
-            TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
-            
-            if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER:
-                try:
-                    from twilio.rest import Client
-                    
-                    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-                    
-                    message = client.messages.create(
-                        body=f"Your DecentralChat verification code is: {otp}\n\nThis code expires in 10 minutes.",
-                        from_=TWILIO_PHONE_NUMBER,
-                        to=phone
-                    )
-                    
-                    logger.info(f"✅ SMS sent successfully to {phone} - SID: {message.sid}")
-                    
-                    return web.json_response({
-                        "success": True, 
-                        "message": "Verification code sent to your phone"
-                    })
-                    
-                except Exception as sms_error:
-                    logger.error(f"❌ SMS sending failed: {sms_error}")
-                    
-                    # Check if it's a Twilio-specific error
-                    if "unverified" in str(sms_error).lower():
-                        return web.json_response({
-                            "error": "Phone number not verified in Twilio trial. Add it at https://console.twilio.com/us1/develop/phone-numbers/manage/verified"
-                        }, status=400)
-                    
-                    return web.json_response({
-                        "error": f"Failed to send SMS: {str(sms_error)}"
-                    }, status=500)
-            else:
-                # Development mode - return OTP in response
-                logger.warning(f"⚠️ DEV MODE - Twilio not configured")
-                logger.warning(f"📱 OTP for {phone}: {otp}")
-                
-                return web.json_response({
-                    "success": True,
-                    "message": "DEV MODE: OTP shown in response",
-                    "dev_otp": otp,
-                    "note": "Configure Twilio credentials to send real SMS"
-                })
-
-        except Exception as e:
-            logger.error(f"Send OTP error: {e}", exc_info=True)
-            return web.json_response({"error": str(e)}, status=500)
-
     async def send_verification_code(self, request):
         """Send OTP for phone verification using Twilio"""
         try:
@@ -6561,6 +6669,11 @@ class MockRedis:
             if not self.data[name]:
                 del self.data[name]
         return len(keys)
+    
+    async def hkeys(self, name):
+        """Get all keys in a hash"""
+        return list(self.data.get(name, {}).keys())
+    
     async def sadd(self, name, *values):
         if name not in self.sets:
             self.sets[name] = set()
@@ -6634,11 +6747,24 @@ class MockRedis:
 
     def pipeline(self):
         """Mock pipeline for batch operations"""
-        return self
+        return MockPipeline(self)
 
     async def execute(self):
         """Execute pipeline"""
-        return [True, True] 
+        results = []
+        for cmd in self.commands:
+            if cmd[0] == 'set' or cmd[0] == 'delete' or cmd[0] == 'expire':
+                await getattr(self.redis, cmd[0])(*cmd[1:])
+                results.append(True)
+            elif cmd[0] == 'get':
+                results.append(await self.redis.get(cmd[1]))
+            elif cmd[0] == 'hget':
+                results.append(await self.redis.hget(cmd[1], cmd[2]))
+            elif cmd[0] == 'hkeys':
+                results.append(await self.redis.hkeys(cmd[1]))
+            else:
+                results.append(None)
+        return results 
         
 class MockPipeline:
     def __init__(self, redis):
