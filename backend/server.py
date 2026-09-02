@@ -25,6 +25,7 @@ import base64
 import bcrypt
 import random
 import mimetypes
+import secrets
 import string
 from datetime import timedelta
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1' 
@@ -197,10 +198,134 @@ def print_conversion_capabilities():
 
 print_conversion_capabilities()
 
+# ==================== SECURE KEY MANAGEMENT ====================
+
+def _ensure_secret_key(path=None):
+    """
+    Load SECRET_KEY from env var, or from a file on disk, or generate once and persist.
+    Ensures JWT signing key never changes across restarts.
+    """
+    env_key = os.getenv('SECRET_KEY')
+    if env_key:
+        return env_key
+    if path is None:
+        path = os.path.join(os.path.dirname(__file__), '.secret_key')
+    path = Path(path)
+    if path.exists():
+        key = path.read_text().strip()
+        if key:
+            logger.info("✅ Loaded SECRET_KEY from file")
+            return key
+    from cryptography.fernet import Fernet
+    key = Fernet.generate_key().decode()
+    try:
+        path.write_text(key)
+        logger.info(f"✅ Generated and saved SECRET_KEY to {path}")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not save SECRET_KEY to {path}: {e}")
+    return key
+
+
+def _ensure_fernet_key(path=None):
+    """
+    Load ENCRYPTION_KEY from env var, or from a file on disk, or generate once and persist.
+    Ensures encrypted data never becomes undecryptable after restart.
+    """
+    env_key = os.getenv('ENCRYPTION_KEY')
+    if env_key:
+        return env_key.encode() if isinstance(env_key, str) else env_key
+    if path is None:
+        path = os.path.join(os.path.dirname(__file__), '.fernet_key')
+    path = Path(path)
+    if path.exists():
+        raw = path.read_text().strip()
+        if raw:
+            logger.info("✅ Loaded ENCRYPTION_KEY from file")
+            return raw.encode() if isinstance(raw, str) else raw
+    from cryptography.fernet import Fernet
+    key = Fernet.generate_key()
+    try:
+        path.write_text(key.decode() if isinstance(key, bytes) else key)
+        logger.info(f"✅ Generated and saved ENCRYPTION_KEY to {path}")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not save ENCRYPTION_KEY to {path}: {e}")
+    return key if isinstance(key, bytes) else key.encode()
+
+
+def _resolve_safe_path(base_dir, user_path):
+    """
+    Verify that a user-supplied file path resolves within the allowed base directory.
+    Prevents SSRF / path traversal attacks.
+    Raises ValueError if the path escapes.
+    """
+    base = Path(base_dir).resolve()
+    target = Path(user_path).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        raise ValueError(
+            f"Path traversal blocked: '{user_path}' resolves to '{target}' "
+            f"which is outside the allowed base directory '{base}'"
+        )
+    return target
+
+
+
+def _validate_file_magic(file_path, expected_ext):
+    """
+    Check magic bytes for images; for non-images, reject obvious script content.
+    Returns True if file looks safe, False otherwise.
+    """
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(512)
+
+        image_signatures = {
+            'png': (b'\x89PNG\r\n\x1a\n',),
+            'jpg': (b'\xff\xd8\xff',),
+            'jpeg': (b'\xff\xd8\xff',),
+            'gif': (b'GIF87a', b'GIF89a'),
+            'webp': (b'RIFF',),
+            'bmp': (b'BM',),
+            'ico': (b'\x00\x00\x01\x00',),
+        }
+
+        ext_lower = expected_ext.lower()
+        if ext_lower in image_signatures:
+            sigs = image_signatures[ext_lower]
+            if ext_lower == 'webp':
+                if not header.startswith(b'RIFF') or header[8:12] != b'WEBP':
+                    return False
+            elif not any(header.startswith(s) for s in sigs):
+                return False
+            return True
+
+        if ext_lower not in ('html', 'htm'):
+            lower_header = header.lower()
+            for pattern in (b'<html', b'<script', b'<?php'):
+                if pattern in lower_header:
+                    return False
+
+        return True
+    except Exception:
+        return True
+
+
+def _validate_password(password):
+    """Validate password strength. Returns (is_valid, message)."""
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters"
+    if not any(c.isupper() for c in password):
+        return False, "Password must contain at least one uppercase letter"
+    if not any(c.isdigit() for c in password):
+        return False, "Password must contain at least one digit"
+    return True, ""
+
+
 # ==================== CONFIGURATION ====================
 
 PORT = int(os.getenv('PORT', 8080))
-SECRET_KEY = os.getenv('SECRET_KEY', Fernet.generate_key().decode())
+SECRET_KEY = _ensure_secret_key()
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
 FIREBASE_CRED = os.getenv('FIREBASE_CRED_PATH', 'firebase-config.json')
 
@@ -221,7 +346,7 @@ for category in ['images', 'videos', 'audio', 'documents', 'archives', 'voices',
     (UPLOAD_DIR / category).mkdir(parents=True, exist_ok=True)
 
 # Encryption for messages
-ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY', Fernet.generate_key())
+ENCRYPTION_KEY = _ensure_fernet_key()
 cipher_suite = Fernet(ENCRYPTION_KEY if isinstance(ENCRYPTION_KEY, bytes) else ENCRYPTION_KEY.encode())
 
 # Global state
@@ -233,11 +358,103 @@ redis_client: Optional[redis.Redis] = None
 
 # ==================== SERVER CLASS ====================
 
+
+def _log_safe(obj):
+    """Redact sensitive data from log messages. Returns a sanitized string."""
+    s = str(obj)
+    # Redact emails: user@domain.com -> u***@domain.com
+    import re
+    s = re.sub(r'([a-zA-Z0-9])[a-zA-Z0-9._%+-]*@', lambda m: m.group(1) + '***@', s)
+    # Redact phone numbers: +919876543210 -> +91******3210
+    s = re.sub(r'(\+\d{2})\d{6}(\d{4})', r'******', s)
+    return s
+
+
+
+def _is_admin(request):
+    """Check if the request user is an admin. Also enabled if DEBUG=true."""
+    if os.getenv('DEBUG', '').lower() in ('true', '1', 'yes'):
+        return True
+    admin_ids_str = os.getenv('ADMIN_USER_IDS', '').strip()
+    if not admin_ids_str:
+        return False
+    admin_ids = set(a.strip() for a in admin_ids_str.split(',') if a.strip())
+    try:
+        import jwt
+        auth = request.headers.get('Authorization', '')
+        if not auth.startswith('Bearer '):
+            return False
+        token = auth.replace('Bearer ', '')
+        payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+        return payload.get('user_id') in admin_ids
+    except Exception:
+        return False
+
+
+# ==================== CSRF PROTECTION ====================
+
+def _validate_cors_origin(request):
+    """
+    Validate Origin/Referer header against allowed origins for state-changing requests.
+    Only blocks actual mismatches; allows if headers absent.
+    """
+    allowed_origins = {'http://localhost:8080', 'http://127.0.0.1:8080'}
+    prod_origin = os.getenv('ALLOWED_ORIGIN', '').strip()
+    if prod_origin:
+        allowed_origins.add(prod_origin)
+
+    if request.method in ('GET', 'HEAD', 'OPTIONS'):
+        return True
+
+    origin = request.headers.get('Origin', '').strip().rstrip('/')
+    referer = request.headers.get('Referer', '').strip().rstrip('/')
+
+    if not origin and not referer:
+        return True
+
+    check = origin or referer
+    for allowed in allowed_origins:
+        if check.startswith(allowed):
+            return True
+
+    import logging
+    log = logging.getLogger(__name__)
+    log.warning(f"⚠️ CSRF check failed: method={request.method}, origin={origin}, referer={referer}")
+    return False
+
+
+# ==================== RATE LIMITER ====================
+
+class RateLimiter:
+    """Simple in-memory rate limiter (no locks needed — single event loop)."""
+    
+    def __init__(self, max_attempts=5, window_seconds=60):
+        self._max_attempts = max_attempts
+        self._window = window_seconds
+        self._store = {}  # key -> list[float] timestamps
+
+    def is_rate_limited(self, key):
+        """Check and record an attempt. Returns True if limited."""
+        import time
+        now = time.time()
+        window = self._window
+        if key not in self._store:
+            self._store[key] = []
+        timestamps = self._store[key]
+        cutoff = now - window
+        self._store[key] = [t for t in timestamps if t > cutoff]
+        if len(self._store[key]) >= self._max_attempts:
+            return True
+        self._store[key].append(now)
+        return False
+
+
 class DecentralChatServer:
     def __init__(self):
         self.app = web.Application(client_max_size=MAX_FILE_SIZE)
         self.firebase_app = None
         self.storage_bucket = None
+        self.rate_limiter = RateLimiter(max_attempts=5, window_seconds=60)
         
     async def initialize(self):
         """Initialize all services"""
@@ -246,6 +463,34 @@ class DecentralChatServer:
         await self.migrate_existing_files()
         # ✅ ALWAYS reload data from Firestore on startup
         await self.preload_critical_data_from_firestore()
+        
+        # Add CSRF middleware
+        @web.middleware
+        async def csrf_middleware(request, handler):
+            if not _validate_cors_origin(request):
+                return web.json_response({"error": "Forbidden"}, status=403)
+            return await handler(request)
+        self.app.middlewares.append(csrf_middleware)
+
+        # Security headers middleware
+        @web.middleware
+        async def security_headers_middleware(request, handler):
+            resp = await handler(request)
+            resp.headers['X-Content-Type-Options'] = 'nosniff'
+            resp.headers['X-Frame-Options'] = 'DENY'
+            resp.headers['X-XSS-Protection'] = '1; mode=block'
+            resp.headers['Content-Security-Policy'] = (
+                "default-src 'self'; "
+                "img-src 'self' data: https:; "
+                "media-src 'self' https:; "
+                "connect-src 'self' ws: wss:; "
+                "font-src 'self' https:; "
+                "style-src 'self' 'unsafe-inline' https:; "
+                "script-src 'self' 'unsafe-inline' https:; "
+                "frame-src 'none'"
+            )
+            return resp
+        self.app.middlewares.append(security_headers_middleware)
         
         self.setup_routes()
         self.setup_cors()   
@@ -319,8 +564,9 @@ class DecentralChatServer:
 
     def setup_cors(self):
         """Setup CORS for all routes"""
+        allowed_origin = os.getenv('ALLOWED_ORIGIN', '*')
         cors = aiohttp_cors.setup(self.app, defaults={
-            "*": aiohttp_cors.ResourceOptions(
+            allowed_origin: aiohttp_cors.ResourceOptions(
                 allow_credentials=True,
                 expose_headers="*",
                 allow_headers="*",
@@ -334,6 +580,10 @@ class DecentralChatServer:
     
     def setup_routes(self):
         """Setup all API routes"""
+                # Custom file-serving route that supports ?token= JWT auth
+        # (Backward-compatible: still falls through to static dir)
+        self.app.router.add_get('/api/uploads/{filename:.*}', self.serve_upload)
+        # Also register the static dir as fallback
         self.app.router.add_static('/api/uploads/', path=str(UPLOAD_DIR), name='uploads')
         # Root
         self.app.router.add_get('/', self.serve_frontend)  
@@ -454,6 +704,12 @@ class DecentralChatServer:
     async def handle_register(self, request):
         """Register new user with bcrypt password hashing"""
         try:
+            # Rate limiting
+            ip = request.remote or request.headers.get('X-Forwarded-For', 'unknown')
+            if self.rate_limiter.is_rate_limited(f"register:{ip}"):
+                logger.warning(f"⚠️ Rate limited registration attempt from {ip}")
+                return web.json_response({"error": "Too many attempts. Please try again later."}, status=429)
+
             data = await request.json()
             
             # ADD THESE SAFETY CHECKS
@@ -465,7 +721,7 @@ class DecentralChatServer:
                 )
         
             # Log incoming data for debugging
-            logger.info(f"📥 Registration data keys: {data.keys()}")
+            logger.info(f"📥 Registration data keys: {list(data.keys())}")
             
             # FIXED: Properly extract and validate each field
             username = str(data.get('username', '')).strip() if data.get('username') else ''
@@ -473,7 +729,7 @@ class DecentralChatServer:
             email = str(data.get('email', '')).strip() if data.get('email') else ''
             phone = str(data.get('phone', '')).strip() if data.get('phone') else ''
             
-            logger.info(f"📝 Parsed values - username: '{username}', email: '{email}', phone: '{phone}'")
+            logger.info(f"📝 Parsed values - username: '{username}', email: '{_log_safe(email)}', phone: '{_log_safe(phone)}'")
 
             # Validation
             if not username or len(username) < 3:
@@ -482,9 +738,10 @@ class DecentralChatServer:
                     status=400
                 )
             
-            if not password or len(password) < 6:
+            is_valid, pw_msg = _validate_password(password) if password else (False, "Password is required")
+            if not is_valid:
                 return web.json_response(
-                    {"error": "Password must be at least 6 characters"},
+                    {"error": pw_msg},
                     status=400
                 )
 
@@ -605,14 +862,16 @@ class DecentralChatServer:
                 except Exception as fb_err:
                     logger.error(f"Firestore save failed: {fb_err}")
 
-            # Generate JWT token
+            # Generate JWT tokens
             token = self.generate_token(user_id)
+            refresh_token = self._generate_refresh_token(user_id, request.headers.get('User-Agent', '')[:128])
 
             logger.info(f"✅ User registered successfully: {username} (ID: {user_id})")
 
             return web.json_response({
                 "success": True,
                 "token": token,
+                "refresh_token": refresh_token,
                 "user": {
                     "id": user_id,
                     "username": username,
@@ -630,6 +889,8 @@ class DecentralChatServer:
 
     async def debug_redis_state(self, request):
         """Debug: Check Redis state"""
+        if not _is_admin(request):
+            return web.json_response({"error": "Not found"}, status=404)
         username = request.match_info.get('username', 'all')
         
         if username == 'all':
@@ -659,11 +920,17 @@ class DecentralChatServer:
     async def handle_login(self, request):
         """Login user with bcrypt password verification"""
         try:
+            # Rate limiting
+            ip = request.remote or request.headers.get('X-Forwarded-For', 'unknown')
+            if self.rate_limiter.is_rate_limited(f"login:{ip}"):
+                logger.warning(f"⚠️ Rate limited login attempt from {ip}")
+                return web.json_response({"error": "Too many attempts. Please try again later."}, status=429)
+
             data = await request.json()
             identifier = data.get('username', '').strip()
             password = data.get('password', '')
 
-            logger.info(f"🔐 Login attempt for: {identifier}")
+            logger.info(f"🔐 Login attempt for: {_log_safe(identifier)}")
 
             if not identifier or not password:
                 return web.json_response(
@@ -796,8 +1063,9 @@ class DecentralChatServer:
                 logger.error(f"❌ Password verification error: {e}")
                 return web.json_response({"error": "Authentication failed"}, status=401)
 
-            # Step 9: Generate token
+            # Step 9: Generate tokens
             token = self.generate_token(user_id)
+            refresh_token = self._generate_refresh_token(user_id, request.headers.get('User-Agent', '')[:128])
 
             # Step 10: Update status
             await redis_client.hset(f"user:{user_id}", mapping={
@@ -811,6 +1079,7 @@ class DecentralChatServer:
             return web.json_response({
                 "success": True,
                 "token": token,
+                "refresh_token": refresh_token,
                 "user": {
                     "id": user_id,
                     "username": user_data.get('username'),
@@ -854,6 +1123,8 @@ class DecentralChatServer:
 
     async def debug_check_user(self, request):
         """Debug: Check if user exists in Redis and Firestore"""
+        if not _is_admin(request):
+            return web.json_response({"error": "Not found"}, status=404)
         username = request.match_info['username']
         
         result = {
@@ -894,6 +1165,8 @@ class DecentralChatServer:
         return web.json_response(result)
     async def debug_user_chats(self, request):
         """Debug: Check user's chats"""
+        if not _is_admin(request):
+            return web.json_response({"error": "Not found"}, status=404)
         try:
             user_id = await self.get_user_from_token(request)
             if not user_id:
@@ -926,26 +1199,99 @@ class DecentralChatServer:
             return web.json_response({"error": str(e)}, status=500)
             
     async def refresh_token(self, request):
-        """Refresh JWT token"""
+        """Refresh JWT access token using a refresh token."""
         try:
-            user_id = await self.get_user_from_token(request)
-            if not user_id:
-                return web.json_response({"error": "Unauthorized"}, status=401)
+            data = await request.json()
+            refresh_token_str = data.get('refresh_token', '')
+            if not refresh_token_str:
+                return web.json_response({"error": "Refresh token required"}, status=400)
 
-            token = self.generate_token(user_id)
-            return web.json_response({"success": True, "token": token})
+            # Decode the refresh token
+            try:
+                payload = jwt.decode(refresh_token_str, SECRET_KEY, algorithms=['HS256'])
+            except jwt.ExpiredSignatureError:
+                return web.json_response({"error": "Refresh token expired. Please log in again."}, status=401)
+            except jwt.InvalidTokenError:
+                return web.json_response({"error": "Invalid refresh token"}, status=401)
+
+            if payload.get('type') != 'refresh':
+                return web.json_response({"error": "Invalid token type"}, status=401)
+
+            token_id = payload.get('token_id')
+            user_id = payload.get('user_id')
+
+            if not token_id or not user_id:
+                return web.json_response({"error": "Invalid refresh token payload"}, status=401)
+
+            # Check if refresh token was revoked (exists in Redis)
+            stored = await redis_client.hgetall(f"refresh_token:{token_id}")
+            if stored and stored.get('revoked') == 'true':
+                logger.warning(f"⚠️ Attempted use of revoked refresh token {token_id} for user {user_id}")
+                return web.json_response({"error": "Refresh token revoked. Please log in again."}, status=401)
+
+            # Optionally rotate: revoke old, issue new
+            if stored:
+                await redis_client.hset(f"refresh_token:{token_id}", "revoked", "true")
+
+            # Generate new access + refresh tokens
+            device_fp = request.headers.get('User-Agent', '')[:128]
+            new_access = self.generate_token(user_id)
+            new_refresh = self._generate_refresh_token(user_id, device_fp)
+
+            return web.json_response({
+                "success": True,
+                "token": new_access,
+                "refresh_token": new_refresh
+            })
 
         except Exception as e:
+            logger.error(f"❌ Refresh token error: {e}", exc_info=True)
             return web.json_response({"error": str(e)}, status=500)
 
     def generate_token(self, user_id: str) -> str:
-        """Generate JWT token"""
+        """Generate JWT access token (15-minute expiry)"""
         payload = {
             'user_id': user_id,
-            'exp': datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=30),
+            'exp': datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=15),
             'iat': datetime.datetime.now(datetime.UTC)
         }
         return jwt.encode(payload, SECRET_KEY, algorithm='HS256')
+
+    def _generate_refresh_token(self, user_id: str, device_fingerprint: str = '') -> str:
+        """Generate a 30-day refresh token, stored in Redis for rotation."""
+        token_id = str(uuid.uuid4())
+        payload = {
+            'user_id': user_id,
+            'token_id': token_id,
+            'type': 'refresh',
+            'exp': datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=30),
+            'iat': datetime.datetime.now(datetime.UTC)
+        }
+        refresh_token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
+        # Store in Redis with device fingerprint for revocation / rotation
+        loop = asyncio.get_event_loop()
+        try:
+            token_data = {
+                'user_id': user_id,
+                'device_fingerprint': device_fingerprint,
+                'created_at': datetime.datetime.now(datetime.UTC).isoformat()
+            }
+            asyncio.run_coroutine_threadsafe(
+                self._store_refresh_token(token_id, token_data),
+                loop
+            )
+        except Exception:
+            pass  # Gracefully degrade: refresh still works, just no persistence
+        return refresh_token
+
+    async def _store_refresh_token(self, token_id: str, token_data: dict):
+        """Persist refresh token metadata in Redis."""
+        try:
+            await redis_client.hset(f"refresh_token:{token_id}", mapping=token_data)
+            await redis_client.expire(f"refresh_token:{token_id}", 30 * 24 * 3600)  # 30 days
+        except Exception:
+            pass
+
 
     async def get_user_from_token(self, request) -> Optional[str]:
         """Extract user ID from JWT token"""
@@ -4194,6 +4540,10 @@ class DecentralChatServer:
             if not user_id:
                 return web.json_response({"error": "Unauthorized"}, status=401)
 
+            # Per-user upload rate limit check
+            if await self._check_upload_rate_limit(user_id):
+                return web.json_response({"error": "Upload rate limit exceeded (50/hour)"}, status=429)
+
             # Detect mobile device
             user_agent = request.headers.get('User-Agent', '')
             is_mobile = any(x in user_agent for x in ['iPhone', 'iPad', 'Android', 'Mobile'])
@@ -4271,6 +4621,12 @@ class DecentralChatServer:
                 logger.error(f"❌ File missing after save: {file_path}")
                 return web.json_response({"error": "File save failed"}, status=500)
 
+            # Magic byte validation
+            if not _validate_file_magic(file_path, ext):
+                file_path.unlink(missing_ok=True)
+                logger.warning(f"❌ File rejected by magic byte check: {filename} (ext={ext})")
+                return web.json_response({"error": "File content does not match its extension"}, status=400)
+
             # Thumbnail generation (only for images)
             thumbnail_url = None
             if file_type == 'image':
@@ -4332,12 +4688,34 @@ class DecentralChatServer:
             logger.error(f"❌ File upload error: {e}", exc_info=True)
             return web.json_response({"error": str(e)}, status=500)
 
+    async def _check_upload_rate_limit(self, user_id: str) -> bool:
+        """Check per-user upload rate limit (50/hour via Redis). Returns True if limited."""
+        key = f"user_upload_count:{user_id}"
+        try:
+            count = await redis_client.get(key)
+            if count is None:
+                await redis_client.setex(key, 3600, 1)
+                return False
+            count = int(count)
+            if count >= 50:
+                logger.warning(f"⚠️ Upload rate limit hit for user {user_id}")
+                return True
+            await redis_client.incr(key)
+            await redis_client.expire(key, 3600)
+            return False
+        except Exception:
+            return False  # Graceful degradation
+
     async def upload_voice(self, request):
         """Upload voice message with Firestore persistence"""
         try:
             user_id = await self.get_user_from_token(request)
             if not user_id:
                 return web.json_response({"error": "Unauthorized"}, status=401)
+
+            # Per-user upload rate limit check
+            if await self._check_upload_rate_limit(user_id):
+                return web.json_response({"error": "Upload rate limit exceeded (50/hour)"}, status=429)
 
             logger.info(f"🎤 Voice upload started by user: {user_id}")
 
@@ -4474,8 +4852,13 @@ class DecentralChatServer:
             
             if not file_meta:
                 return web.json_response({"error": "File not found"}, status=404)
-            
-            source_path = Path(file_meta['path'])
+
+            try:
+                source_path = _resolve_safe_path(UPLOAD_DIR, file_meta['path'])
+            except ValueError as e:
+                logger.error(f"❌ Blocked path traversal in convert_uploaded_file: {e}")
+                return web.json_response({"error": "Invalid file path"}, status=400)
+
             if not source_path.exists():
                 return web.json_response({"error": "Source file missing"}, status=404)
             
@@ -4715,6 +5098,50 @@ class DecentralChatServer:
             logger.error(f"Error getting conversion formats: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
+    async def serve_upload(self, request):
+        """Serve uploaded files with optional token-based auth fallback."""
+        try:
+            filename = request.match_info.get('filename', '')
+            if not filename:
+                return web.json_response({"error": "Not found"}, status=404)
+
+            # Token-based auth fallback: ?token=<jwt> 
+            token = request.query.get('token', '')
+            user_id = None
+            if token:
+                try:
+                    payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+                    user_id = payload.get('user_id')
+                except Exception:
+                    pass
+
+            # If no token, try Authorization header
+            if not user_id:
+                user_id = await self.get_user_from_token(request)
+
+            # If authenticated via either method, try to authorize the file access
+            if user_id:
+                try:
+                    file_path = _resolve_safe_path(UPLOAD_DIR, UPLOAD_DIR / filename)
+                except ValueError:
+                    return web.json_response({"error": "Not found"}, status=404)
+                if file_path.exists():
+                    return web.FileResponse(file_path)
+
+            # Fall through to static dir for unauthenticated access (backward compat)
+            # but _resolve_safe_path validates path safety
+            try:
+                fallback_path = _resolve_safe_path(UPLOAD_DIR, UPLOAD_DIR / filename)
+            except ValueError:
+                return web.json_response({"error": "Not found"}, status=404)
+
+            if fallback_path.exists():
+                return web.FileResponse(fallback_path)
+            return web.json_response({"error": "Not found"}, status=404)
+        except Exception as e:
+            logger.error(f"Serve upload error: {e}")
+            return web.json_response({"error": "Not found"}, status=404)
+
     async def get_file(self, request):
         """Get uploaded file"""
         try:
@@ -4725,7 +5152,12 @@ class DecentralChatServer:
             if not file_meta:
                 return web.json_response({"error": "File not found"}, status=404)
 
-            file_path = Path(file_meta['path'])
+            try:
+                file_path = _resolve_safe_path(UPLOAD_DIR, file_meta['path'])
+            except ValueError as e:
+                logger.error(f"❌ Blocked path traversal in get_file: {e}")
+                return web.json_response({"error": "Invalid file path"}, status=400)
+
             if not file_path.exists():
                 return web.json_response({"error": "File not found"}, status=404)
 
@@ -4748,7 +5180,14 @@ class DecentralChatServer:
             if not file_meta or not file_meta.get('thumbnail_url'):
                 return web.json_response({"error": "Thumbnail not found"}, status=404)
 
-            thumb_path = UPLOAD_DIR / 'thumbnails' / f"{file_id}_thumb.jpg"
+            # Construct thumbnail path from file_id and validate it's within UPLOAD_DIR/thumbnails
+            thumb_relative = Path('thumbnails') / f"{file_id}_thumb.jpg"
+            try:
+                thumb_path = _resolve_safe_path(UPLOAD_DIR, UPLOAD_DIR / thumb_relative)
+            except ValueError as e:
+                logger.error(f"❌ Blocked path traversal in get_thumbnail: {e}")
+                return web.json_response({"error": "Invalid thumbnail path"}, status=400)
+
             if not thumb_path.exists():
                 return web.json_response({"error": "Thumbnail not found"}, status=404)
 
@@ -5832,7 +6271,7 @@ class DecentralChatServer:
         """Handle WebSocket message - ENHANCED with blocking checks and reply_to"""
         try:
             chat_id = data.get('chat_id')
-            content = data.get('content', '').strip()
+            content = data.get('content', '').strip()[:10000]
             message_type = data.get('message_type', 'text')
             encrypted = data.get('encrypted', True)
             reply_to = data.get('reply_to')  # ✅ CRITICAL: Extract reply_to from WebSocket data
@@ -5951,6 +6390,16 @@ class DecentralChatServer:
     async def broadcast_typing(self, user_id: str, chat_id: str, is_typing: bool):
         """Broadcast typing indicator"""
         try:
+            # Typing cooldown: ignore repeats under 500ms
+            now = datetime.datetime.now(datetime.UTC)
+            last_key = f"typing_cooldown:{user_id}:{chat_id}"
+            last_time = getattr(self, '_typing_cooldowns', {}).get(last_key)
+            if last_time and (now - last_time).total_seconds() < 0.5:
+                return
+            if not hasattr(self, '_typing_cooldowns'):
+                self._typing_cooldowns = {}
+            self._typing_cooldowns[last_key] = now
+            
             # Get chat members
             member_ids = await redis_client.smembers(f"chat_members:{chat_id}")
             member_ids = [m for m in member_ids if m != user_id]
@@ -6050,7 +6499,7 @@ class DecentralChatServer:
             if not email or not google_id:
                 return web.json_response({"error": "Invalid Google data"}, status=400)
             
-            logger.info(f"Google auth attempt for: {email}, Google ID: {google_id}")
+            logger.info(f"Google auth attempt for: {_log_safe(email)}, Google ID: {google_id[-8:] if len(google_id) > 8 else google_id}")
             
             # STEP 1: Check if user exists by Google ID first
             user_id = await redis_client.hget("google_id_map", google_id)
@@ -6156,11 +6605,15 @@ class DecentralChatServer:
                 "last_login": datetime.datetime.now(datetime.UTC).isoformat()
             })
             
+            # Generate refresh token for Google auth
+            refresh_token = self._generate_refresh_token(user_id, request.headers.get('User-Agent', '')[:128])
+
             logger.info(f"✅ Google Sign-In successful: {user_data.get('username')} (ID: {user_id})")
             
             return web.json_response({
                 "success": True,
                 "token": jwt_token,
+                "refresh_token": refresh_token,
                 "user": {
                     "id": user_id,
                     "username": user_data.get('username'),
@@ -6194,10 +6647,10 @@ class DecentralChatServer:
             if not phone.startswith('+'):
                 return web.json_response({"error": "Phone must include country code (e.g., +1234567890)"}, status=400)
 
-            logger.info(f"📱 Normalized phone number: {phone}")
+            logger.info(f"📱 Normalized phone number: {_log_safe(phone)}")
 
             # Generate 6-digit OTP
-            otp = ''.join(random.choices(string.digits, k=6))
+            otp = ''.join(secrets.choice(string.digits) for _ in range(6))
             
             # Store OTP in Redis with 10-minute expiry
             await redis_client.setex(f"otp:{phone}", 600, otp)

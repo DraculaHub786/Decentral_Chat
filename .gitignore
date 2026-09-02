@@ -18,6 +18,12 @@ __pycache__/
 *.so
 .Python
 
+# Auto-generated encryption keys (persistent across restarts)
+.secret_key
+.fernet_key
+backend/.secret_key
+backend/.fernet_key
+
 # Environment variables (contains secrets)
 backend/.env
 .env
