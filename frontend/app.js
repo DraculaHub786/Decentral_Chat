@@ -1,0 +1,10491 @@
+        function detectAPIURL() {
+            // Check if running on GitHub Codespaces or VS Code port forwarding
+            if (window.location.hostname.includes('github.dev') ||
+                window.location.hostname.includes('gitpod.io') ||
+                window.location.hostname.includes('codespaces')) {
+
+                console.log('🔧 Detected port forwarding environment');
+
+                // Use the forwarded URL directly
+                const apiUrl = window.location.origin + '/api';
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${wsProtocol}//${window.location.host}/api/ws`;
+
+                return { apiUrl, wsUrl };
+            }
+
+            // Local development or normal hosting
+            const apiUrl = window.location.origin + '/api';
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${wsProtocol}//${window.location.host}/api/ws`;
+
+            return { apiUrl, wsUrl };
+        }
+
+        const { apiUrl: API_URL, wsUrl: WS_URL } = detectAPIURL();
+
+        console.log('🌐 API URL:', API_URL);
+        console.log('🔌 WebSocket URL:', WS_URL);
+        const GOOGLE_CLIENT_ID = '429063225880-ik4tc871593fth7vm8up51enuh8qf460.apps.googleusercontent.com';
+
+        // ===== TOKEN REFRESH INTERCEPTOR =====
+        // Wraps fetch() to auto-refresh on 401 and retry the original request.
+        let _refreshingToken = false;
+        let _refreshQueue = [];
+
+        async function _doRefreshToken() {
+            const rt = localStorage.getItem('refresh_token');
+            if (!rt) return false;
+            try {
+                const resp = await fetch(API_URL + '/auth/refresh', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ refresh_token: rt })
+                });
+                if (!resp.ok) return false;
+                const data = await resp.json();
+                if (data.success && data.token) {
+                    localStorage.setItem('auth_token', data.token);
+                    if (data.refresh_token) localStorage.setItem('refresh_token', data.refresh_token);
+                    authToken = data.token;
+                    return true;
+                }
+                return false;
+            } catch {
+                return false;
+            }
+        }
+
+        async function apiFetch(url, options = {}) {
+            // Attach auth header
+            const token = authToken || localStorage.getItem('auth_token');
+            if (token && !options.headers) options.headers = {};
+            if (token && options.headers) {
+                if (!options.headers.Authorization) options.headers['Authorization'] = `Bearer ${token}`;
+            }
+            let resp = await fetch(url, options);
+            if (resp.status === 401 && token) {
+                // Attempt refresh
+                if (!_refreshingToken) {
+                    _refreshingToken = true;
+                    const ok = await _doRefreshToken();
+                    _refreshingToken = false;
+                    if (ok) {
+                        // Refresh queue
+                        _refreshQueue.forEach(cb => cb());
+                        _refreshQueue = [];
+                        // Retry original request with new token
+                        if (!options.headers) options.headers = {};
+                        options.headers['Authorization'] = `Bearer ${localStorage.getItem('auth_token')}`;
+                        resp = await fetch(url, options);
+                    } else {
+                        // Refresh failed — force logout
+                        showCustomAlert('Session expired. Please log in again.', 'Session Expired').then(() => {
+                            window.isLoggingOut = true;
+                            authToken = null;
+                            localStorage.removeItem('auth_token');
+                            localStorage.removeItem('refresh_token');
+                            localStorage.removeItem('current_user');
+                            document.getElementById('chatInterface').style.display = 'none';
+                            document.getElementById('loginScreen').style.display = 'flex';
+                            setTimeout(() => { window.isLoggingOut = false; }, 500);
+                        });
+                    }
+                } else {
+                    // Another refresh is in progress — wait for it
+                    await new Promise(resolve => _refreshQueue.push(resolve));
+                    if (!options.headers) options.headers = {};
+                    options.headers['Authorization'] = `Bearer ${localStorage.getItem('auth_token')}`;
+                    resp = await fetch(url, options);
+                }
+            }
+            return resp;
+        }
+
+        // Monkey-patch original fetch so all existing code benefits
+        const _originalFetch = window.fetch;
+        window.fetch = function(url, options) {
+            // Only intercept requests to our API
+            if (typeof url === 'string' && url.includes(window.location.host)) {
+                return apiFetch(url, options);
+            }
+            return _originalFetch.call(window, url, options);
+        };
+
+        window.apiFetch = apiFetch;
+        window._doRefreshToken = _doRefreshToken;
+
+        window.isLoggingOut = false;
+
+        // Country codes for phone input
+        const countryCodes = [
+            { code: '+1', country: 'United States', flag: '🇺🇸' },
+            { code: '+1', country: 'Canada', flag: '🇨🇦' },
+            { code: '+44', country: 'United Kingdom', flag: '🇬🇧' },
+            { code: '+91', country: 'India', flag: '🇮🇳' },
+            { code: '+86', country: 'China', flag: '🇨🇳' },
+            { code: '+81', country: 'Japan', flag: '🇯🇵' },
+            { code: '+49', country: 'Germany', flag: '🇩🇪' },
+            { code: '+33', country: 'France', flag: '🇫🇷' },
+            { code: '+39', country: 'Italy', flag: '🇮🇹' },
+            { code: '+34', country: 'Spain', flag: '🇪🇸' },
+            { code: '+7', country: 'Russia', flag: '🇷🇺' },
+            { code: '+82', country: 'South Korea', flag: '🇰🇷' },
+            { code: '+61', country: 'Australia', flag: '🇦🇺' },
+            { code: '+55', country: 'Brazil', flag: '🇧🇷' },
+            { code: '+52', country: 'Mexico', flag: '🇲🇽' },
+            { code: '+27', country: 'South Africa', flag: '🇿🇦' },
+            { code: '+20', country: 'Egypt', flag: '🇪🇬' },
+            { code: '+234', country: 'Nigeria', flag: '🇳🇬' },
+            { code: '+92', country: 'Pakistan', flag: '🇵🇰' },
+            { code: '+880', country: 'Bangladesh', flag: '🇧🇩' },
+            { code: '+62', country: 'Indonesia', flag: '🇮🇩' },
+            { code: '+63', country: 'Philippines', flag: '🇵🇭' },
+            { code: '+66', country: 'Thailand', flag: '🇹🇭' },
+            { code: '+84', country: 'Vietnam', flag: '🇻🇳' },
+            { code: '+90', country: 'Turkey', flag: '🇹🇷' },
+            { code: '+971', country: 'UAE', flag: '🇦🇪' },
+            { code: '+966', country: 'Saudi Arabia', flag: '🇸🇦' },
+            { code: '+98', country: 'Iran', flag: '🇮🇷' },
+            { code: '+972', country: 'Israel', flag: '🇮🇱' },
+            { code: '+65', country: 'Singapore', flag: '🇸🇬' },
+            { code: '+60', country: 'Malaysia', flag: '🇲🇾' },
+            { code: '+64', country: 'New Zealand', flag: '🇳🇿' },
+            { code: '+31', country: 'Netherlands', flag: '🇳🇱' },
+            { code: '+46', country: 'Sweden', flag: '🇸🇪' },
+            { code: '+47', country: 'Norway', flag: '🇳🇴' },
+            { code: '+45', country: 'Denmark', flag: '🇩🇰' },
+            { code: '+358', country: 'Finland', flag: '🇫🇮' },
+            { code: '+48', country: 'Poland', flag: '🇵🇱' },
+            { code: '+380', country: 'Ukraine', flag: '🇺🇦' },
+            { code: '+30', country: 'Greece', flag: '🇬🇷' },
+            { code: '+351', country: 'Portugal', flag: '🇵🇹' },
+            { code: '+41', country: 'Switzerland', flag: '🇨🇭' },
+            { code: '+43', country: 'Austria', flag: '🇦🇹' },
+            { code: '+32', country: 'Belgium', flag: '🇧🇪' },
+            { code: '+353', country: 'Ireland', flag: '🇮🇪' },
+            { code: '+420', country: 'Czech Republic', flag: '🇨🇿' },
+            { code: '+36', country: 'Hungary', flag: '🇭🇺' },
+            { code: '+40', country: 'Romania', flag: '🇷🇴' }
+        ];
+
+        // ==================== CUSTOM ALERT & CONFIRM MODALS ====================
+        let customAlertCallback = null;
+        let customConfirmCallback = null;
+
+        function showCustomAlert(message, title = 'Notice') {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('customAlertModal');
+                const titleEl = document.getElementById('customAlertTitle');
+                const messageEl = document.getElementById('customAlertMessage');
+
+                titleEl.textContent = title;
+                messageEl.textContent = message;
+
+                customAlertCallback = resolve;
+                modal.classList.add('active');
+
+                // Close on backdrop click
+                modal.onclick = (e) => {
+                    if (e.target === modal) closeCustomAlert();
+                };
+            });
+        }
+
+        function closeCustomAlert() {
+            const modal = document.getElementById('customAlertModal');
+            modal.classList.remove('active');
+            if (customAlertCallback) {
+                customAlertCallback(true);
+                customAlertCallback = null;
+            }
+        }
+
+        function showCustomConfirm(message, title = 'Confirm') {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('customConfirmModal');
+                const titleEl = document.getElementById('customConfirmTitle');
+                const messageEl = document.getElementById('customConfirmMessage');
+
+                titleEl.textContent = title;
+                messageEl.textContent = message;
+
+                customConfirmCallback = resolve;
+                modal.classList.add('active');
+
+                // Close on backdrop click (counts as cancel)
+                modal.onclick = (e) => {
+                    if (e.target === modal) closeCustomConfirm(false);
+                };
+            });
+        }
+
+        function closeCustomConfirm(result) {
+            const modal = document.getElementById('customConfirmModal');
+            modal.classList.remove('active');
+            if (customConfirmCallback) {
+                customConfirmCallback(result);
+                customConfirmCallback = null;
+            }
+        }
+
+        // Override default alert and confirm for consistency
+        const originalAlert = window.alert;
+        const originalConfirm = window.confirm;
+
+        window.alert = function (message) {
+            return showCustomAlert(message);
+        };
+
+        window.confirm = function (message) {
+            return showCustomConfirm(message);
+        };
+
+        const CHAT_KEY_STORE = 'e2e_chat_keys';
+
+        // Global State
+        let currentUser = null;
+        let authToken = null;
+        let ws = null;
+        let wsReconnectAttempts = 0;
+        let wsReconnectTimer = null;
+        let activeChat = null;
+        let chats = [];
+        let contacts = [];
+        let typingTimeout = null;
+        let selectedFiles = [];
+        let isRecording = false;
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let recordingStartTime = null;
+        let recordingInterval = null;
+        let isTyping = false;
+        let currentCall = null;
+        let peerConnection = null;
+        let localStream = null;
+        let remoteStream = null;
+        let callDurationInterval = null;
+        let typingUsers = new Set();
+        let typingTimeouts = {};
+        // Group Call Support
+        let isGroupCall = false;
+        let groupCallPeers = new Map(); // userId -> RTCPeerConnection
+        let groupCallStreams = new Map(); // userId -> MediaStream
+        let phoneToVerify = '';
+        let googleInitialized = false;
+        let fileConversionMap = {};
+        let convertingFiles = new Set();
+
+        // Audio playback manager
+        let activeAudios = {};
+        // Add this function near the top of your script section
+        async function fetchTURNCredentials() {
+            console.log('🔄 Using OpenRelay TURN servers (free)...');
+
+            // OpenRelay - Always works, no API key needed
+            return [
+                // Google STUN
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+
+                // OpenRelay TURN (Free, no registration)
+                {
+                    urls: 'turn:openrelay.metered.ca:80',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+
+                // Twilio STUN (very reliable)
+                { urls: 'stun:global.stun.twilio.com:3478' }
+            ];
+        }
+
+        // Initialize rtcConfig as null (will be set dynamically)
+        let rtcConfig = null;
+
+        async function testTURNServer() {
+            console.log('🧪 ===== TESTING TURN CONNECTIVITY =====');
+
+            // Fetch fresh credentials
+            const iceServers = await fetchTURNCredentials();
+
+            const pc = new RTCPeerConnection({
+                iceServers: iceServers,
+                iceCandidatePoolSize: 10
+            });
+
+            let relayFound = false;
+            let candidateCount = { host: 0, srflx: 0, relay: 0 };
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    const type = event.candidate.type;
+                    candidateCount[type] = (candidateCount[type] || 0) + 1;
+
+                    console.log('🧊 Test ICE Candidate:', {
+                        type: type,
+                        protocol: event.candidate.protocol,
+                        address: event.candidate.address,
+                        port: event.candidate.port
+                    });
+
+                    if (type === 'relay') {
+                        relayFound = true;
+                        console.log('✅✅✅ TURN IS WORKING! Found relay candidate! ✅✅✅');
+                    }
+                } else {
+                    console.log('🎉 Test ICE Gathering Complete');
+                    console.log('📊 Results:', candidateCount);
+
+                    if (!relayFound) {
+                        console.error('❌ TURN TEST FAILED - NO RELAY CANDIDATES');
+                        console.log('🔍 Possible issues:');
+                        console.log('   1. Firewall blocking TURN ports (80, 443)');
+                        console.log('   2. Network policy blocking UDP/TCP relay');
+                        console.log('   3. ISP blocking relay traffic');
+                        console.log('   4. Try from different network (mobile data vs WiFi)');
+
+                        // Show user-friendly message
+                        alert('⚠️ TURN server test failed!\n\nCross-network calls may not work.\n\nTry:\n• Different network (WiFi/Mobile data)\n• Disable VPN if active\n• Check firewall settings');
+                    } else {
+                        console.log('✅ TURN TEST PASSED - Cross-network calls should work!');
+                    }
+                }
+            };
+
+            // Create offer to trigger ICE gathering
+            pc.createDataChannel('test');
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            // Wait 5 seconds for ICE gathering
+            await new Promise(resolve => setTimeout(resolve, 5000));
+
+            pc.close();
+            console.log('🧪 ===== TURN TEST COMPLETE =====');
+        }
+
+        // ========== Authentication ==========
+
+        let isLoginMode = true;
+
+        // ✅ FIXED: Toggle auth mode without breaking handlers
+        function toggleAuth() {
+            isLoginMode = !isLoginMode;
+            document.getElementById('authTitle').textContent = isLoginMode ? 'Welcome Back' : 'Create Account';
+            document.getElementById('authBtnText').textContent = isLoginMode ? 'Sign In' : 'Sign Up';
+
+            // Update toggle text
+            const toggleText = document.getElementById('toggleText');
+            toggleText.innerHTML = isLoginMode
+                ? 'Don\'t have an account? <a id="toggleLink">Sign up</a>'
+                : 'Already have an account? <a id="toggleLink">Sign in</a>';
+
+            // Show/hide fields
+            document.getElementById('emailGroup').style.display = isLoginMode ? 'none' : 'block';
+            document.getElementById('phoneGroup').style.display = isLoginMode ? 'none' : 'block';
+
+            // Re-attach ONLY the toggle link (don't touch the form handler)
+            const newToggleLink = document.getElementById('toggleLink');
+            if (newToggleLink) {
+                newToggleLink.addEventListener('click', toggleAuth);
+            }
+        }
+
+        function setAuthLoading(loading) {
+            const btn = document.getElementById('authSubmitBtn');
+            const text = document.getElementById('authBtnText');
+            const loader = document.getElementById('authBtnLoading');
+
+            // ✅ CRITICAL: Don't disable the button, just show loading
+            btn.style.opacity = loading ? '0.6' : '1';
+            btn.style.cursor = loading ? 'not-allowed' : 'pointer';
+            // DON'T SET: btn.disabled = loading; ← THIS WAS BLOCKING CLICKS
+
+            text.style.display = loading ? 'none' : 'inline';
+            loader.style.display = loading ? 'inline-block' : 'none';
+        }
+        function showError(message) {
+        console.error('Error:', message);
+        // Show in UI login error div (if visible)
+        const errorEl = document.getElementById('errorMessage');
+        if (errorEl && errorEl.offsetParent !== null) {
+            errorEl.textContent = message;
+            errorEl.style.display = 'block';
+            setTimeout(() => errorEl.style.display = 'none', 5000);
+        }
+        // ALWAYS show toast notification (works on all screens)
+        if (typeof showToast === 'function') showToast(message, 'error');
+        // Also show as browser notification if available
+        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            new Notification('Error', { body: message, icon: '/favicon.ico' });
+        }
+    }
+
+        function showSuccess(message) {
+            const successEl = document.getElementById('successMessage');
+            successEl.textContent = message;
+            successEl.style.display = 'block';
+            setTimeout(() => successEl.style.display = 'none', 3000);
+        }
+
+        function hideMessages() {
+            document.getElementById('errorMessage').style.display = 'none';
+            document.getElementById('successMessage').style.display = 'none';
+        }
+
+        // ===========================================================
+        // E2E ENCRYPTION ENGINE - Web Crypto API (ECDH + AES-GCM)
+        // Provides end-to-end encrypted messaging and file transfer
+        // ===========================================================
+        const CryptoEngine = {
+            keyPair: null,          // ECDH key pair for this user
+            chatKeys: new Map(),    // chatId -> CryptoKey (AES-GCM shared key)
+            _ready: false,
+            storeKeyName: CHAT_KEY_STORE,
+
+            // ---------- Initialization ----------
+            async init() {
+                if (!window.crypto || !window.crypto.subtle) {
+                    console.warn('⚠️ SubtleCrypto not available. Encryption disabled.');
+                    return false;
+                }
+                try {
+                    // Load or generate ECDH keypair
+                    const storedPriv = localStorage.getItem('e2e_private_key');
+                    const storedPub = localStorage.getItem('e2e_public_key');
+
+                    if (storedPriv && storedPub) {
+                        const privJwk = JSON.parse(storedPriv);
+                        const pubJwk = JSON.parse(storedPub);
+                        const privKey = await crypto.subtle.importKey('jwk', privJwk,
+                            { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']);
+                        const pubKey = await crypto.subtle.importKey('jwk', pubJwk,
+                            { name: 'ECDH', namedCurve: 'P-256' }, true, []);
+                        this.keyPair = { privateKey: privKey, publicKey: pubKey };
+                        console.log('🔑 Loaded existing E2E keypair');
+                    } else {
+                        this.keyPair = await crypto.subtle.generateKey(
+                            { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']);
+                        const privJwk = await crypto.subtle.exportKey('jwk', this.keyPair.privateKey);
+                        const pubJwk = await crypto.subtle.exportKey('jwk', this.keyPair.publicKey);
+                        localStorage.setItem('e2e_private_key', JSON.stringify(privJwk));
+                        localStorage.setItem('e2e_public_key', JSON.stringify(pubJwk));
+                        console.log('🔑 Generated new E2E keypair');
+                    }
+
+                    this._ready = true;
+                    await this.loadStoredChatKeys();
+                    return true;
+                } catch (e) {
+                    console.error('❌ CryptoEngine init failed:', e);
+                    return false;
+                }
+            },
+
+            // ---------- Upload own public key to server ----------
+            async uploadPublicKey() {
+                if (!this._ready || !authToken) return;
+                try {
+                    const pubJwk = await crypto.subtle.exportKey('jwk', this.keyPair.publicKey);
+                    await fetch(API_URL + '/users/me', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+                        body: JSON.stringify({ public_key: JSON.stringify(pubJwk) })
+                    });
+                    console.log('🔑 Public key uploaded to server');
+                } catch (e) {
+                    console.warn('⚠️ Could not upload public key:', e.message);
+                }
+            },
+
+            // ---------- Fetch another user's public key ----------
+            async fetchUserPublicKey(userId) {
+                try {
+                    const res = await fetch(`${API_URL}/users/${userId}/public_key`, {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    const data = await res.json();
+                    if (data.success && data.public_key) {
+                        return JSON.parse(data.public_key);
+                    }
+                } catch (e) {
+                    console.warn('⚠️ Could not fetch public key for', userId, ':', e.message);
+                }
+                return null;
+            },
+
+            // ---------- Setup shared key for a chat (ECDH) ----------
+            async setupChatKey(chatId, otherUserId) {
+                if (!this._ready) return false;
+                if (this.chatKeys.has(chatId)) return true;  // Already set up
+
+                try {
+                    const otherPubJwk = await this.fetchUserPublicKey(otherUserId);
+                    if (!otherPubJwk) {
+                        console.log(`ℹ️ No public key for user ${otherUserId} — chat will be unencrypted`);
+                        return false;
+                    }
+
+                    const otherPubKey = await crypto.subtle.importKey(
+                        'jwk', otherPubJwk,
+                        { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+
+                    const sharedKey = await crypto.subtle.deriveKey(
+                        { name: 'ECDH', public: otherPubKey },
+                        this.keyPair.privateKey,
+                        { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+
+                    this.chatKeys.set(chatId, sharedKey);
+                    await this.persistChatKey(chatId, sharedKey);
+                    console.log(`🔒 E2E key established for chat ${chatId}`);
+                    return true;
+                } catch (e) {
+                    console.warn('⚠️ Could not set up chat key:', e.message);
+                    return false;
+                }
+            },
+
+            // For group chats: derive a deterministic AES key from chat ID + user IDs
+            async setupGroupChatKey(chatId, memberIds) {
+                if (!this._ready) return false;
+                if (this.chatKeys.has(chatId)) return true;
+                try {
+                    // Use PBKDF2 with the sorted member IDs as salt
+                    const sortedIds = [...memberIds].sort().join(':');
+                    const enc = new TextEncoder();
+                    const baseKey = await crypto.subtle.importKey(
+                        'raw', enc.encode(sortedIds + chatId),
+                        { name: 'PBKDF2' }, false, ['deriveKey']);
+                    const groupKey = await crypto.subtle.deriveKey(
+                        { name: 'PBKDF2', salt: enc.encode('decentral_chat_v1'), iterations: 100000, hash: 'SHA-256' },
+                        baseKey,
+                        { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+                    this.chatKeys.set(chatId, groupKey);
+                    await this.persistChatKey(chatId, groupKey);
+                    console.log(`🔒 Group E2E key derived for ${chatId}`);
+                    return true;
+                } catch (e) {
+                    console.warn('⚠️ Could not set up group key:', e.message);
+                    return false;
+                }
+            },
+
+            // ---------- Encrypt a string ----------
+            async encryptText(chatId, plaintext) {
+                const key = this.chatKeys.get(chatId);
+                if (!key || !plaintext) return null;
+                try {
+                    const enc = new TextEncoder();
+                    const iv = crypto.getRandomValues(new Uint8Array(12));
+                    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(plaintext));
+                    // Pack: iv (12 bytes) + ciphertext, base64-encode
+                    const buf = new Uint8Array(12 + ct.byteLength);
+                    buf.set(iv, 0);
+                    buf.set(new Uint8Array(ct), 12);
+                    return btoa(String.fromCharCode(...buf));
+                } catch (e) {
+                    console.error('❌ Encrypt failed:', e);
+                    return null;
+                }
+            },
+
+            // ---------- Decrypt a string ----------
+            async decryptText(chatId, ciphertext) {
+                const key = this.chatKeys.get(chatId);
+                if (!key || !ciphertext) return null;
+                try {
+                    const raw = Uint8Array.from(atob(ciphertext), c => c.charCodeAt(0));
+                    const iv = raw.slice(0, 12);
+                    const ct = raw.slice(12);
+                    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+                    return new TextDecoder().decode(pt);
+                } catch (e) {
+                    // Decryption failure — likely old unencrypted message or wrong key
+                    console.warn('⚠️ Decrypt failed (may be unencrypted)');
+                    return null;
+                }
+            },
+
+            // ---------- Encrypt a file ArrayBuffer ----------
+            async encryptBuffer(chatId, buffer) {
+                const key = this.chatKeys.get(chatId);
+                if (!key) return null;
+                try {
+                    const iv = crypto.getRandomValues(new Uint8Array(12));
+                    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, buffer);
+                    const out = new Uint8Array(12 + ct.byteLength);
+                    out.set(iv, 0);
+                    out.set(new Uint8Array(ct), 12);
+                    return out.buffer;
+                } catch (e) {
+                    console.error('❌ File encrypt failed:', e);
+                    return null;
+                }
+            },
+
+            // ---------- Decrypt a file ArrayBuffer ----------
+            async decryptBuffer(chatId, encBuffer) {
+                const key = this.chatKeys.get(chatId);
+                if (!key) return null;
+                try {
+                    const raw = new Uint8Array(encBuffer);
+                    const iv = raw.slice(0, 12);
+                    const ct = raw.slice(12);
+                    return await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+                } catch (e) {
+                    console.error('❌ File decrypt failed:', e);
+                    return null;
+                }
+            },
+
+            // ---------- Is encryption available for a chat? ----------
+            hasKey(chatId) {
+                return this.chatKeys.has(chatId);
+            },
+
+            // ---------- Clear chat key ----------
+            clearChatKey(chatId) {
+                this.chatKeys.delete(chatId);
+                this.removeStoredChatKey(chatId);
+            },
+
+            // ---------- Persist/restore chat keys ----------
+            async persistChatKey(chatId, key) {
+                try {
+                    const jwk = await crypto.subtle.exportKey('jwk', key);
+                    const store = JSON.parse(localStorage.getItem(this.storeKeyName) || '{}');
+                    store[chatId] = jwk;
+                    localStorage.setItem(this.storeKeyName, JSON.stringify(store));
+                } catch (e) {
+                    console.warn('⚠️ Could not persist chat key:', e.message);
+                }
+            },
+
+            removeStoredChatKey(chatId) {
+                const raw = localStorage.getItem(this.storeKeyName);
+                if (!raw) return;
+                try {
+                    const store = JSON.parse(raw);
+                    delete store[chatId];
+                    localStorage.setItem(this.storeKeyName, JSON.stringify(store));
+                } catch (e) {
+                    console.warn('⚠️ Could not remove stored key:', e.message);
+                }
+            },
+
+            async loadStoredChatKeys() {
+                try {
+                    const raw = localStorage.getItem(this.storeKeyName);
+                    if (!raw) return;
+                    const store = JSON.parse(raw);
+                    const entries = Object.entries(store);
+                    for (const [chatId, jwk] of entries) {
+                        try {
+                            const key = await crypto.subtle.importKey(
+                                'jwk',
+                                jwk,
+                                { name: 'AES-GCM', length: 256 },
+                                false,
+                                ['encrypt', 'decrypt']
+                            );
+                            this.chatKeys.set(chatId, key);
+                        } catch (e) {
+                            console.warn('⚠️ Could not import stored key for chat', chatId, e.message);
+                        }
+                    }
+                    if (entries.length) {
+                        console.log(`🔑 Restored ${entries.length} chat key(s) from storage`);
+                    }
+                } catch (e) {
+                    console.warn('⚠️ Chat key restore failed:', e.message);
+                }
+            }
+        };
+
+        async function showChatInterface() {
+            console.log('🎨 Showing chat interface...');
+
+            // CRITICAL: Clear logout flag
+            window.isLoggingOut = false;
+
+            document.getElementById('loginScreen').style.display = 'none';
+            document.getElementById('chatInterface').style.display = 'block';
+
+            document.getElementById('currentUsername').textContent = currentUser.username;
+            document.getElementById('userRole').textContent = currentUser.role === 'admin' ? '👑 Admin' : 'User';
+
+            if (currentUser.avatar_url) {
+                const avatarUrl = currentUser.avatar_url.startsWith('http')
+                    ? currentUser.avatar_url
+                    : API_URL + currentUser.avatar_url;
+                document.getElementById('userAvatar').innerHTML = `<img src="${avatarUrl}" alt="Avatar">`;
+            } else {
+                document.getElementById('userAvatar').textContent = currentUser.username[0].toUpperCase();
+            }
+
+            await requestNotificationPermission();
+
+            // 🔒 Initialize E2E encryption engine
+            const encReady = await CryptoEngine.init();
+            if (encReady) {
+                await CryptoEngine.uploadPublicKey();
+                console.log('🔒 E2E encryption ready');
+            }
+
+            // ✅ CRITICAL FIX: Load chats BEFORE connecting WebSocket
+            console.log('📇 Loading contacts...');
+            await loadContacts();
+
+            console.log('💬 Loading chats...');
+            await loadChats();
+
+            console.log('🔌 Connecting WebSocket...');
+            if (window.innerWidth <= 768) {
+                setTimeout(() => {
+                    const sidebar = document.getElementById('sidebar');
+                    sidebar.classList.add('show');
+
+                    const backdrop = document.createElement('div');
+                    backdrop.id = 'sidebarBackdrop';
+                    backdrop.className = 'sidebar-backdrop show';
+                    backdrop.onclick = closeSidebarMobile;
+                    document.body.appendChild(backdrop);
+                }, 300);
+            }
+            connectWebSocket();
+
+            console.log('✅ Chat interface ready');
+        }
+
+        async function logout() {
+            if (await confirm('Are you sure you want to logout?')) {
+                console.log('🚪 Logging out...');
+
+                // CRITICAL: Set flag to prevent reconnection
+                window.isLoggingOut = true;
+
+                wsReconnectAttempts = 0;
+
+                // Send logout to backend
+                if (authToken) {
+                    fetch(API_URL + '/auth/logout', {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    }).catch(console.error);
+                }
+
+                // Clear all state
+                authToken = null;
+                currentUser = null;
+                activeChat = null;
+                chats = [];
+                contacts = [];
+                selectedFiles = [];
+                typingUsers.clear();
+                currentCall = null;
+                peerConnection = null;
+                localStream = null;
+                remoteStream = null;
+
+                // Clear storage
+                localStorage.removeItem('auth_token');
+                localStorage.removeItem('current_user');
+
+                // ✅ CRITICAL FIX: Reset the form mode to login
+                isLoginMode = true;
+                document.getElementById('authTitle').textContent = 'Welcome Back';
+                document.getElementById('authBtnText').textContent = 'Sign In';
+                document.getElementById('toggleText').innerHTML = 'Don\'t have an account? <a id="toggleLink">Sign up</a>';
+                document.getElementById('emailGroup').style.display = 'none';
+                document.getElementById('phoneGroup').style.display = 'none';
+
+                // ✅ Re-attach toggle event listener
+                document.getElementById('toggleLink').addEventListener('click', toggleAuth);
+
+                // Reset UI
+                document.getElementById('chatInterface').style.display = 'none';
+                document.getElementById('loginScreen').style.display = 'flex';
+
+                // ✅ Clear form inputs
+                document.getElementById('username').value = '';
+                document.getElementById('password').value = '';
+                document.getElementById('email').value = '';
+                document.getElementById('phone').value = '';
+
+                // Clear messages
+                document.getElementById('messagesContainer').innerHTML = '';
+                document.getElementById('contactsList').innerHTML = '';
+
+                // ✅ Close all open modals and menus
+                document.querySelectorAll('.modal.active').forEach(modal => {
+                    modal.classList.remove('active');
+                });
+
+                // Close sidebar if open
+                const sidebar = document.getElementById('sidebar');
+                if (sidebar) {
+                    sidebar.classList.remove('show');
+                }
+
+                // Remove any backdrop
+                const backdrop = document.getElementById('sidebarBackdrop');
+                if (backdrop) {
+                    backdrop.remove();
+                }
+
+                // Close context menu if open
+                const contextMenu = document.querySelector('.message-context-menu');
+                if (contextMenu) {
+                    contextMenu.style.display = 'none';
+                }
+
+                // Close any other floating menus
+                document.body.classList.remove('context-menu-open');
+                document.body.style.overflow = '';
+
+                // Reset connection status
+                document.getElementById('connectionStatus').style.display = 'none';
+
+                // ✅ Enable the form
+                const authForm = document.getElementById('authForm');
+                authForm.style.display = 'block';
+
+                const submitBtn = document.getElementById('authSubmitBtn');
+                submitBtn.disabled = false;
+
+                // Reset logout flag after delay
+                setTimeout(() => {
+                    window.isLoggingOut = false;
+                }, 1000);
+
+                console.log('✅ Logged out successfully');
+            }
+        }
+        // ========== WebSocket ==========
+
+        function connectWebSocket() {
+            // CRITICAL: Don't reconnect if logging out
+            if (window.isLoggingOut) {
+                console.log('⏹️ Skipping WebSocket connection (logging out)');
+                return;
+            }
+
+            // Don't reconnect if no token
+            if (!authToken) {
+                console.log('⏹️ Skipping WebSocket connection (no auth token)');
+                return;
+            }
+
+            if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+                return;
+            }
+
+            // Clear any pending reconnection timer
+            if (wsReconnectTimer) {
+                clearTimeout(wsReconnectTimer);
+                wsReconnectTimer = null;
+            }
+
+            console.log('🔌 Connecting to WebSocket...');
+
+            try {
+                ws = new WebSocket(WS_URL);
+
+                ws.onopen = () => {
+                    console.log('✅ WebSocket connected');
+                    wsReconnectAttempts = 0;
+
+                    // Re-authenticate immediately
+                    if (authToken) {
+                        ws.send(JSON.stringify({ type: 'auth', token: authToken }));
+                    }
+
+                    updateConnectionStatus(true);
+                };
+
+                ws.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    handleWebSocketMessage(data);
+                };
+
+                ws.onerror = (error) => {
+                    console.error('❌ WebSocket error:', error);
+                    updateConnectionStatus(false);
+                };
+
+                ws.onclose = (event) => {
+                    console.log('🔌 WebSocket disconnected, code:', event.code);
+                    ws = null;
+                    updateConnectionStatus(false);
+
+                    // Check if connection was refused due to authentication (code 1008 = policy violation)
+                    if (event.code === 1008 || event.code === 1011) {
+                        console.warn('⚠️ Authentication failed - token may be expired');
+                        showCustomAlert(
+                            'Your session has expired. Please log in again.',
+                            'Session Expired'
+                        ).then(() => {
+                            // Force logout
+                            window.isLoggingOut = true;
+                            authToken = null;
+                            localStorage.removeItem('auth_token');
+                            localStorage.removeItem('current_user');
+                            document.getElementById('chatInterface').style.display = 'none';
+                            document.getElementById('loginScreen').style.display = 'flex';
+                            setTimeout(() => { window.isLoggingOut = false; }, 500);
+                        });
+                        return;
+                    }
+
+                    // CRITICAL: Only reconnect if NOT logging out and have valid token
+                    if (!window.isLoggingOut && authToken && wsReconnectAttempts < 10) {
+                        wsReconnectAttempts++;
+                        const delay = Math.min(1000 * Math.pow(1.5, wsReconnectAttempts), 10000);
+                        console.log(`🔄 Reconnecting in ${delay / 1000}s... (attempt ${wsReconnectAttempts}/10)`);
+
+                        wsReconnectTimer = setTimeout(() => {
+                            connectWebSocket();
+                        }, delay);
+                    } else if (wsReconnectAttempts >= 10) {
+                        console.error('❌ Max reconnection attempts reached');
+                        // Show user-friendly message after max attempts
+                        updateConnectionStatus(false, true); // Pass flag for max attempts reached
+                        showCustomAlert(
+                            'Connection lost. Please check your internet connection and refresh the page to reconnect.',
+                            'Connection Failed'
+                        );
+                    }
+                };
+            } catch (error) {
+                console.error('❌ WebSocket connection error:', error);
+            }
+        }
+        function initEmojiSupport() {
+            document.body.classList.add('emoji-enabled');
+            console.log('😀 Emoji support initialized');
+        }
+
+        document.addEventListener('DOMContentLoaded', initEmojiSupport);
+
+        // Keep-alive ping every 25 seconds
+        let pingInterval = null;
+
+        function startPingInterval() {
+            if (pingInterval) {
+                clearInterval(pingInterval);
+            }
+
+            pingInterval = setInterval(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    try {
+                        ws.send(JSON.stringify({ type: 'ping' }));
+                    } catch (error) {
+                        console.error('Ping failed:', error);
+                        // Force reconnect if ping fails
+                        if (ws) {
+                            ws.close();
+                        }
+                    }
+                }
+            }, 25000);
+        }
+
+        function handleWebSocketMessage(data) {
+            console.log('📨 Received:', data.type, data);
+
+            switch (data.type) {
+                case 'auth_success':
+                    console.log('✅ WebSocket authenticated');
+                    startPingInterval(); // Start heartbeat
+                    break;
+
+                case 'new_message':
+                    handleNewMessage(data);
+                    break;
+
+                case 'user_status':
+                    handleUserStatus(data);
+                    break;
+
+                case 'typing':
+                    handleTyping(data);
+                    break;
+
+                case 'message_read':
+                    handleMessageRead(data);
+                    break;
+
+                case 'new_chat':
+                    loadChats();
+                    break;
+
+                case 'incoming_call':
+                    handleIncomingCall(data);
+                    break;
+
+                case 'call_signal':
+                case 'call_offer':
+                case 'call_answer':
+                case 'ice_candidate':
+                    handleCallSignal(data);
+                    break;
+
+                case 'call_rejected':
+                case 'call_ended':
+                    handleCallEnd(data);
+                    break;
+
+                // Group call messages
+                case 'group_call_start':
+                case 'group_call_started':
+                    handleGroupCallStart(data);
+                    break;
+
+                case 'group_call_offer':
+                    handleGroupCallOffer(data);
+                    break;
+
+                case 'group_call_answer':
+                    handleGroupCallAnswer(data.from_user, data.answer);
+                    break;
+
+                case 'group_call_ice':
+                    handleGroupCallIceCandidate(data.from_user, data.candidate);
+                    break;
+
+                case 'group_call_participant_joined':
+                    if (isGroupCall && data.user.id !== currentUser.id) {
+                        handleGroupCallParticipantJoined(data);
+                    }
+                    break;
+
+                case 'group_call_participant_left':
+                    if (isGroupCall) {
+                        removeGroupCallParticipant(data.user_id);
+                    }
+                    break;
+
+                case 'group_call_ended':
+                    if (isGroupCall) {
+                        showNotification('Group Call', 'The group call has ended');
+                        endGroupCall();
+                    }
+                    break;
+
+                case 'pong':
+                    break;
+
+                case 'message_deleted':
+                    handleMessageDeleted(data);
+                    break;
+
+                case 'error':
+                    console.error('Server error:', data.message);
+                    showNotification('Error', data.message);
+                    break;
+
+                case 'user_blocked':
+                    // If current chat is with the blocking user, disable input
+                    if (activeChat && activeChat.type === 'direct' && activeChat.other_user_id === data.blocked_by) {
+                        document.getElementById('messageInput').disabled = true;
+                        document.getElementById('messageInput').placeholder = 'This user has blocked you';
+                        document.getElementById('sendBtn').disabled = true;
+                        showNotification('Blocked', 'This user has blocked you');
+                    }
+                    break;
+
+                case 'user_unblocked':
+                    // If current chat is with the unblocking user, enable input
+                    if (activeChat && activeChat.type === 'direct' && activeChat.other_user_id === data.unblocked_by) {
+                        document.getElementById('messageInput').disabled = false;
+                        document.getElementById('messageInput').placeholder = 'Type a message...';
+                        document.getElementById('sendBtn').disabled = false;
+                        showNotification('Unblocked', 'This user has unblocked you');
+                    }
+                    break;
+            }
+        }
+
+        function updateConnectionStatus(connected, maxAttemptsReached = false) {
+            const statusEl = document.getElementById('connectionStatus');
+            const iconEl = document.getElementById('statusIcon');
+            const textEl = document.getElementById('statusText');
+
+            if (connected) {
+                statusEl.className = 'connection-status connected';
+                iconEl.textContent = '●';
+                textEl.textContent = 'Connected';
+                setTimeout(() => statusEl.style.display = 'none', 3000);
+                // Remove click handler
+                statusEl.onclick = null;
+                statusEl.style.cursor = 'default';
+            } else if (maxAttemptsReached) {
+                statusEl.className = 'connection-status disconnected';
+                iconEl.textContent = '⚠';
+                textEl.textContent = 'Connection Failed - Click to Retry';
+                statusEl.style.display = 'flex';
+                statusEl.style.cursor = 'pointer';
+                // Add click handler to retry connection
+                statusEl.onclick = () => {
+                    wsReconnectAttempts = 0; // Reset attempts
+                    connectWebSocket();
+                };
+            } else {
+                statusEl.className = 'connection-status disconnected';
+                iconEl.textContent = '●';
+                textEl.textContent = 'Disconnected - Reconnecting...';
+                statusEl.style.display = 'flex';
+                statusEl.style.cursor = 'default';
+                statusEl.onclick = null;
+            }
+        }
+
+        setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'ping' }));
+            }
+        }, 30000);
+
+        // ========== Contacts ==========
+
+        async function loadContacts() {
+            try {
+                const response = await fetch(API_URL + '/contacts', {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                const data = await response.json();
+                contacts = data.contacts || [];
+                console.log('📇 Loaded contacts:', contacts.length);
+            } catch (error) {
+                console.error('Error loading contacts:', error);
+            }
+        }
+
+        function openAddContact() {
+            document.getElementById('addContactModal').classList.add('active');
+            document.getElementById('contactSearchInput').value = '';
+            document.getElementById('addContactSearchResults').style.display = 'none';
+        }
+
+        async function searchAndAddContact() {
+            const query = document.getElementById('contactSearchInput').value.trim();
+
+            if (!query) {
+                alert('Please enter a username, email or phone number');
+                return;
+            }
+
+            try {
+                const response = await fetch(API_URL + '/contacts', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ identifier: query })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    showNotification('Success', 'Contact added successfully!');
+                    closeModal('addContactModal');
+                    document.getElementById('contactSearchInput').value = '';
+                    await loadContacts();
+                    await loadChats();
+                } else {
+                    alert(data.error || 'Failed to add contact');
+                }
+            } catch (error) {
+                console.error('Error adding contact:', error);
+                alert('Failed to add contact');
+            }
+        }
+
+        function searchContacts(query) {
+            query = query.toLowerCase().trim();
+
+            console.log('🔍 Searching for:', query);
+
+            const chatItems = document.querySelectorAll('.contact-item');
+
+            console.log('📋 Found', chatItems.length, 'chat items');
+
+            if (!query) {
+                // Show all chats if search is empty
+                chatItems.forEach(item => {
+                    item.style.display = 'flex';
+                });
+                return;
+            }
+
+            let visibleCount = 0;
+
+            chatItems.forEach(item => {
+                const nameEl = item.querySelector('.contact-name');
+                const messageEl = item.querySelector('.contact-last-message');
+
+                if (!nameEl) {
+                    console.warn('⚠️ No contact-name found in item');
+                    return;
+                }
+
+                const name = nameEl.textContent.toLowerCase();
+                const message = messageEl ? messageEl.textContent.toLowerCase() : '';
+
+                const matches = name.includes(query) || message.includes(query);
+
+                if (matches) {
+                    item.style.display = 'flex';
+                    visibleCount++;
+                } else {
+                    item.style.display = 'none';
+                }
+            });
+
+            console.log('✅ Showing', visibleCount, 'matching chats');
+
+            // Show "No results" message if no matches
+            if (visibleCount === 0 && query) {
+                const existingNoResults = document.getElementById('noSearchResults');
+                if (existingNoResults) {
+                    existingNoResults.remove();
+                }
+
+                const noResults = document.createElement('div');
+                noResults.id = 'noSearchResults';
+                noResults.style.cssText = 'padding: 40px 20px; text-align: center; color: #888;';
+                noResults.innerHTML = `
+                    <p style="font-size: 40px; margin-bottom: 10px;">🔍</p>
+                    <p>No chats found for "${query}"</p>
+                `;
+
+                document.getElementById('contactsList').appendChild(noResults);
+            } else {
+                const existingNoResults = document.getElementById('noSearchResults');
+                if (existingNoResults) {
+                    existingNoResults.remove();
+                }
+            }
+        }
+        async function openContactsManager() {
+            try {
+                // Close any open modals first
+                closeModal('userMenuModal');
+
+                console.log('👥 Loading contacts manager...');
+
+                // Reload contacts from server
+                await loadContacts();
+
+                const container = document.getElementById('contactsManagerList');
+                if (!container) {
+                    console.error('❌ Contacts manager list container not found');
+                    return;
+                }
+
+                container.innerHTML = '<div style="text-align: center; padding: 20px;"><div class="loading"></div><p style="margin-top: 10px; color: #888;">Loading contacts...</p></div>';
+
+                // Short delay to show loading state
+                await new Promise(resolve => setTimeout(resolve, 300));
+
+                if (!contacts || contacts.length === 0) {
+                    container.innerHTML = `
+                        <div style="padding: 40px 20px; text-align: center; color: #888;">
+                            <p style="font-size: 40px; margin-bottom: 10px;">👥</p>
+                            <p>No contacts yet</p>
+                            <p style="font-size: 12px; margin-top: 5px;">Add contacts using the "Add Contact" button</p>
+                        </div>
+                    `;
+                } else {
+                    container.innerHTML = ''; // Clear loading
+
+                    contacts.forEach(contact => {
+                        const contactEl = document.createElement('div');
+                        contactEl.className = 'user-item';
+                        contactEl.style.cssText = 'display: flex; align-items: center; gap: 15px; padding: 15px; background: rgba(0,0,0,0.4); border: 1px solid rgba(218,165,32,0.2); border-radius: 10px; margin-bottom: 10px; transition: all 0.3s;';
+
+                        // Handle avatar properly
+                        let avatarContent;
+                        if (contact.avatar_url) {
+                            const avatarUrl = contact.avatar_url.startsWith('http')
+                                ? contact.avatar_url
+                                : `${API_URL}${contact.avatar_url}`;
+                            avatarContent = `<img src="${avatarUrl}" alt="${contact.username}" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;" onerror="this.parentElement.innerHTML='${contact.username[0].toUpperCase()}'">`;
+                        } else {
+                            avatarContent = contact.username ? contact.username[0].toUpperCase() : '?';
+                        }
+
+                        contactEl.innerHTML = `
+                            <div class="avatar" style="width: 50px; height: 50px; font-size: 24px; flex-shrink: 0;">${avatarContent}</div>
+                            <div style="flex: 1; min-width: 0;">
+                                <div style="font-weight: 600; font-size: 16px; margin-bottom: 3px;">${escapeHtml(contact.username)}</div>
+                                <div style="font-size: 12px; color: #888;">
+                                    ${contact.status === 'online' ? '🟢 Online' : '⚫ Offline'}
+                                    ${contact.email ? ` • ${escapeHtml(contact.email)}` : ''}
+                                </div>
+                            </div>
+                            <button 
+                                onclick="removeContact('${contact.id}')" 
+                                style="background: rgba(229, 72, 77,0.2); border: 1px solid rgba(229, 72, 77,0.4); color: #E5484D; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.3s; flex-shrink: 0;"
+                                onmouseover="this.style.background='rgba(229, 72, 77,0.3)'"
+                                onmouseout="this.style.background='rgba(229, 72, 77,0.2)'"
+                            >
+                                Remove
+                            </button>
+                        `;
+
+                        contactEl.onmouseover = function () {
+                            this.style.background = 'rgba(218,165,32,0.1)';
+                            this.style.borderColor = 'rgba(218,165,32,0.4)';
+                        };
+
+                        contactEl.onmouseout = function () {
+                            this.style.background = 'rgba(0,0,0,0.4)';
+                            this.style.borderColor = 'rgba(218,165,32,0.2)';
+                        };
+
+                        container.appendChild(contactEl);
+                    });
+
+                    console.log(`✅ Displayed ${contacts.length} contacts`);
+                }
+
+                document.getElementById('contactsManagerModal').classList.add('active');
+
+            } catch (error) {
+                console.error('❌ Open contacts manager error:', error);
+                showError('Failed to load contacts: ' + error.message);
+
+                const container = document.getElementById('contactsManagerList');
+                if (container) {
+                    container.innerHTML = `
+                        <div style="padding: 40px 20px; text-align: center; color: #F0787C;">
+                            <p style="font-size: 40px; margin-bottom: 10px;">❌</p>
+                            <p>Failed to load contacts</p>
+                            <p style="font-size: 12px; margin-top: 5px; color: #888;">${escapeHtml(error.message)}</p>
+                        </div>
+                    `;
+                }
+            }
+        }
+
+        async function removeContact(contactId) {
+            if (!await confirm('Remove this contact? You can add them back later.')) return;
+
+            try {
+                console.log('🗑️ Removing contact:', contactId);
+
+                const response = await fetch(API_URL + `/contacts/${contactId}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                if (response.ok) {
+                    console.log('✅ Contact removed from backend');
+
+                    // Remove from local contacts array
+                    contacts = contacts.filter(c => c.id !== contactId);
+
+                    // Reload the contacts manager to show updated list
+                    await openContactsManager();
+
+                    showNotification('Success', 'Contact removed');
+                } else {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Failed to remove contact');
+                }
+            } catch (error) {
+                console.error('❌ Remove contact error:', error);
+                showError('Failed to remove contact: ' + error.message);
+            }
+        }
+
+        // ========== Chats ==========
+
+        /**
+         * Format last message for display in contact list
+         * Decrypts encrypted messages and shows appropriate labels for different message types
+         */
+        async function formatLastMessagePreview(chat) {
+            // ✅ FIRST check message type - even if content is empty, show type-based label
+            const messageType = chat.last_message_type || 'text';
+
+            // Show appropriate label for non-text message types
+            if (messageType === 'voice' || messageType === 'audio') {
+                return '🎵 Audio';
+            } else if (messageType === 'file') {
+                return '📎 File';
+            } else if (messageType === 'image') {
+                return '📷 Image';
+            } else if (messageType === 'video') {
+                return '🎥 Video';
+            }
+
+            // For text messages, check if content exists
+            if (!chat.last_message) {
+                return 'No messages yet';
+            }
+
+            // For text messages, try to decrypt
+            let displayText = chat.last_message;
+
+            // Try to decrypt if encryption is available
+            if (CryptoEngine._ready && chat.id && CryptoEngine.hasKey(chat.id)) {
+                try {
+                    const decrypted = await CryptoEngine.decryptText(chat.id, displayText);
+                    if (decrypted && decrypted !== displayText) {
+                        displayText = decrypted;
+                    }
+                } catch (error) {
+                    // If decryption fails, show the raw message
+                    console.warn('Preview decrypt failed for chat', chat.id, error);
+                }
+            } else if (displayText.length > 30 && /^[A-Za-z0-9+/=]+$/.test(displayText)) {
+                // No key available but looks like encrypted data
+                displayText = '🔒 Encrypted message';
+            }
+
+            // Truncate if too long
+            if (displayText.length > 50) {
+                displayText = displayText.substring(0, 47) + '...';
+            }
+
+            return displayText;
+        }
+
+        async function loadChats() {
+            const container = document.getElementById('contactsList');
+
+            // Show loading
+            container.innerHTML = '<div style="padding: 20px; text-align: center;"><div class="loading"></div><p style="margin-top: 10px; color: #888;">Loading chats...</p></div>';
+
+            try {
+                console.log('📡 Fetching chats from server...');
+
+                const response = await fetch(API_URL + '/chats', {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                chats = data.chats || [];
+
+                console.log('💬 Loaded chats:', chats.length);
+
+                if (chats.length > 0) {
+                    console.log('📋 Chat list:', chats.map(c => ({
+                        id: c.id,
+                        name: c.name,
+                        type: c.type,
+                        has_avatar: !!c.avatar_url
+                    })));
+                }
+
+                // 🔒 Proactively set up encryption keys for all direct chats
+                if (CryptoEngine._ready) {
+                    chats.forEach(chat => {
+                        if (chat.type === 'direct' && chat.other_user_id && !CryptoEngine.hasKey(chat.id)) {
+                            CryptoEngine.setupChatKey(chat.id, chat.other_user_id).catch(() => { });
+                        } else if (chat.type === 'group' && chat.member_ids && !CryptoEngine.hasKey(chat.id)) {
+                            CryptoEngine.setupGroupChatKey(chat.id, chat.member_ids).catch(() => { });
+                        }
+                    });
+                }
+
+                renderChats();
+
+            } catch (error) {
+                console.error('❌ Load chats error:', error);
+                showError('Failed to load chats: ' + error.message);
+                container.innerHTML = '<div style="padding: 20px; text-align: center; color: #F0787C;">Failed to load chats</div>';
+                // Show empty state
+                chats = [];
+                renderChats();
+            }
+        }
+
+        async function renderChats() {
+            const container = document.getElementById('contactsList');
+            container.innerHTML = '';
+
+            console.log('🎨 Rendering', chats.length, 'chats');
+
+            if (chats.length === 0) {
+                container.innerHTML = `
+                    <div style="padding: 40px 20px; text-align: center; color: #888;">
+                        <p style="font-size: 40px; margin-bottom: 10px;">💬</p>
+                        <p>No chats yet</p>
+                        <p style="font-size: 12px; margin-top: 5px;">Add a contact to start chatting</p>
+                    </div>
+                `;
+                return;
+            }
+
+            // Render all chats with formatted last messages
+            for (const [index, chat] of chats.entries()) {
+                try {
+                    const chatEl = document.createElement('div');
+                    chatEl.className = 'contact-item' + (activeChat?.id === chat.id ? ' active' : '');
+                    chatEl.onclick = () => selectChat(chat);
+
+                    // ✅ FIX: Handle avatar URL properly
+                    let avatarContent;
+                    if (chat.avatar_url) {
+                        // Check if it's a full URL (Google avatar) or relative path
+                        const avatarUrl = chat.avatar_url.startsWith('http')
+                            ? chat.avatar_url
+                            : `${API_URL}${chat.avatar_url}`;
+                        avatarContent = `<img src="${avatarUrl}" alt="${chat.name}" onerror="this.parentElement.innerHTML='${(chat.name || '?')[0].toUpperCase()}'">`;
+                    } else {
+                        avatarContent = chat.name ? chat.name[0].toUpperCase() : '?';
+                    }
+
+                    // Format the last message (decrypt if needed)
+                    const formattedLastMessage = await formatLastMessagePreview(chat);
+
+                    chatEl.innerHTML = `
+                        <div class="contact-avatar">
+                            ${avatarContent}
+                            ${chat.status ? `<div class="status-indicator ${chat.status}"></div>` : ''}
+                        </div>
+                        <div class="contact-info">
+                            <div class="contact-name">${escapeHtml(chat.name || 'Unknown')}</div>
+                            <div class="contact-last-message">${escapeHtml(formattedLastMessage)}</div>
+                        </div>
+                        ${chat.unread_count > 0 ? `<div class="unread-badge">${chat.unread_count}</div>` : ''}
+                    `;
+
+                    container.appendChild(chatEl);
+                    console.log(`✅ Rendered chat ${index + 1}:`, chat.name);
+
+                } catch (error) {
+                    console.error('❌ Error rendering chat:', chat.id, error);
+                }
+            }
+        }
+
+        async function openNewChat() {
+            await loadContacts();
+
+            const container = document.getElementById('contactsForChat');
+            container.innerHTML = '';
+
+            if (contacts.length === 0) {
+                container.innerHTML = `
+                    <div style="padding: 20px; text-align: center; color: #888;">
+                        No contacts yet. Add contacts first!
+                    </div>
+                `;
+            } else {
+                contacts.forEach(contact => {
+                    const contactEl = document.createElement('div');
+                    contactEl.className = 'user-item';
+                    contactEl.onclick = () => createDirectChat(contact.id);
+
+                    const _contactAvatarUrl = contact.avatar_url
+                        ? (contact.avatar_url.startsWith('http') ? contact.avatar_url : `${API_URL}${contact.avatar_url}`)
+                        : null;
+                    const avatarContent = _contactAvatarUrl
+                        ? `<img src="${_contactAvatarUrl}" alt="${contact.username}" onerror="this.parentElement.innerHTML='${contact.username[0].toUpperCase()}'">`
+                        : contact.username[0].toUpperCase();
+
+                    contactEl.innerHTML = `
+                        <div class="avatar">${avatarContent}</div>
+                        <div>
+                            <div style="font-weight: 600;">${escapeHtml(contact.username)}</div>
+                            <div style="font-size: 12px; color: #888;">${contact.status || 'offline'}</div>
+                        </div>
+                    `;
+
+                    container.appendChild(contactEl);
+                });
+            }
+
+            document.getElementById('newChatModal').classList.add('active');
+        }
+
+        async function createDirectChat(contactId) {
+            try {
+                const response = await fetch(API_URL + '/chats', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({
+                        type: 'direct',
+                        participants: [contactId]
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    closeModal('newChatModal');
+                    await loadChats();
+
+                    const chat = chats.find(c => c.id === data.chat_id);
+                    if (chat) {
+                        selectChat(chat);
+                    }
+                } else {
+                    alert(data.error || 'Failed to create chat');
+                }
+            } catch (error) {
+                console.error('Error creating chat:', error);
+                alert('Failed to create chat');
+            }
+        }
+
+        // Add this to the selectChat function after the blocking check
+        async function selectChat(chat) {
+            activeChat = chat;
+
+            if (chat.type === 'direct' && !chat.other_user_id) {
+                console.warn('⚠️ other_user_id missing, fetching from backend...');
+                try {
+                    const response = await fetch(`${API_URL}/chats/${chat.id}`, {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    const data = await response.json();
+
+                    if (data.chat && data.chat.members) {
+                        const otherMember = data.chat.members.find(m => m.id !== currentUser.id);
+                        if (otherMember) {
+                            activeChat.other_user_id = otherMember.id;
+                            console.log('✅ Set other_user_id:', otherMember.id);
+                        }
+                    }
+                } catch (error) {
+                    console.error('Failed to get other_user_id:', error);
+                }
+            }
+
+            document.getElementById('emptyState').style.display = 'none';
+            document.getElementById('activeChat').style.display = 'flex';
+
+            document.getElementById('activeChatName').textContent = chat.name || 'Unknown';
+            document.getElementById('activeChatStatus').textContent = chat.status || 'offline';
+
+            const _chatAvatarUrl = chat.avatar_url
+                ? (chat.avatar_url.startsWith('http') ? chat.avatar_url : `${API_URL}${chat.avatar_url}`)
+                : null;
+            const avatarContent = _chatAvatarUrl
+                ? `<img src="${_chatAvatarUrl}" alt="${chat.name}" onerror="this.parentElement.innerHTML='${(chat.name || '?')[0].toUpperCase()}'">`
+                : (chat.name ? chat.name[0].toUpperCase() : '?');
+
+            document.getElementById('activeChatAvatar').innerHTML = avatarContent;
+
+            renderChats();
+            
+            // 🔒 Set up E2E encryption key for this chat BEFORE loading messages
+            if (CryptoEngine._ready && chat.type === 'direct' && chat.other_user_id) {
+                await CryptoEngine.setupChatKey(chat.id, chat.other_user_id).catch(e => console.warn(e));
+            } else if (CryptoEngine._ready && chat.type === 'group' && chat.member_ids) {
+                await CryptoEngine.setupGroupChatKey(chat.id, chat.member_ids).catch(e => console.warn(e));
+            }
+
+            await loadMessages(chat.id);
+
+            // ✅ Check blocking status and update UI
+            if (chat.type === 'direct' && chat.other_user_id) {
+                try {
+                    const response = await fetch(`${API_URL}/users/${chat.other_user_id}/blocked-status`, {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+
+                    const data = await response.json();
+
+                    // Get call buttons
+                    const audioCallBtn = document.querySelector('[onclick="initiateCall(\'audio\')"]');
+                    const videoCallBtn = document.querySelector('[onclick="initiateCall(\'video\')"]');
+
+                    if (data.i_blocked_them || data.they_blocked_me) {
+                        // Disable messaging
+                        document.getElementById('messageInput').disabled = true;
+                        document.getElementById('sendBtn').disabled = true;
+
+                        // ✅ Disable call buttons
+                        if (audioCallBtn) {
+                            audioCallBtn.disabled = true;
+                            audioCallBtn.style.opacity = '0.5';
+                            audioCallBtn.style.cursor = 'not-allowed';
+                            audioCallBtn.title = data.i_blocked_them
+                                ? 'You have blocked this user'
+                                : 'This user has blocked you';
+                        }
+
+                        if (videoCallBtn) {
+                            videoCallBtn.disabled = true;
+                            videoCallBtn.style.opacity = '0.5';
+                            videoCallBtn.style.cursor = 'not-allowed';
+                            videoCallBtn.title = data.i_blocked_them
+                                ? 'You have blocked this user'
+                                : 'This user has blocked you';
+                        }
+
+                        if (data.i_blocked_them) {
+                            document.getElementById('messageInput').placeholder = 'You have blocked this user. Unblock to message.';
+                        } else {
+                            document.getElementById('messageInput').placeholder = 'This user has blocked you. Cannot send messages.';
+                        }
+                    } else {
+                        // Enable messaging and calls
+                        document.getElementById('messageInput').disabled = false;
+                        document.getElementById('sendBtn').disabled = false;
+                        document.getElementById('messageInput').placeholder = 'Type a message...';
+
+                        // ✅ Enable call buttons
+                        if (audioCallBtn) {
+                            audioCallBtn.disabled = false;
+                            audioCallBtn.style.opacity = '1';
+                            audioCallBtn.style.cursor = 'pointer';
+                            audioCallBtn.title = 'Voice Call';
+                        }
+
+                        if (videoCallBtn) {
+                            videoCallBtn.disabled = false;
+                            videoCallBtn.style.opacity = '1';
+                            videoCallBtn.style.cursor = 'pointer';
+                            videoCallBtn.title = 'Video Call';
+                        }
+                    }
+                } catch (error) {
+                    console.error('Failed to check block status:', error);
+                }
+            }
+
+            // ✅ Show/hide group call buttons based on chat type
+            const groupAudioBtn = document.getElementById('groupAudioCallBtn');
+            const groupVideoBtn = document.getElementById('groupVideoCallBtn');
+            const audioCallBtn = document.getElementById('audioCallBtn');
+            const videoCallBtn = document.getElementById('videoCallBtn');
+
+            if (chat.type === 'group') {
+                // Show group call buttons, hide individual call buttons
+                if (groupAudioBtn) groupAudioBtn.style.display = 'flex';
+                if (groupVideoBtn) groupVideoBtn.style.display = 'flex';
+                if (audioCallBtn) audioCallBtn.style.display = 'none';
+                if (videoCallBtn) videoCallBtn.style.display = 'none';
+            } else {
+                // Show individual call buttons, hide group call buttons
+                if (groupAudioBtn) groupAudioBtn.style.display = 'none';
+                if (groupVideoBtn) groupVideoBtn.style.display = 'none';
+                if (audioCallBtn) audioCallBtn.style.display = 'flex';
+                if (videoCallBtn) videoCallBtn.style.display = 'flex';
+            }
+        }
+        // ========== Group Chats ==========
+
+        async function openCreateGroup() {
+            await loadContactsForGroup();
+            document.getElementById('createGroupModal').classList.add('active');
+        }
+
+        async function loadContactsForGroup() {
+            const container = document.getElementById('groupMembersList');
+            container.innerHTML = `
+                <div style="text-align: center; color: #888; padding: 40px;">
+                    <p style="font-size: 40px; margin-bottom: 10px;">💡</p>
+                    <p>Search users above to add members</p>
+                </div>
+            `;
+        }
+
+        async function createGroup() {
+            const name = document.getElementById('groupName').value.trim();
+            const description = document.getElementById('groupDescription').value.trim();
+
+            if (!name || name.length < 3) {
+                alert('Group name must be at least 3 characters');
+                return;
+            }
+
+            const selectedMembers = [];
+            document.querySelectorAll('#groupMembersList input[type="checkbox"]:checked').forEach(checkbox => {
+                selectedMembers.push(checkbox.value);
+            });
+
+            if (selectedMembers.length < 2) {
+                alert('Please select at least 2 members');
+                return;
+            }
+
+            try {
+                const response = await fetch(API_URL + '/chats', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({
+                        type: 'group',
+                        name: name,
+                        description: description,
+                        participants: selectedMembers
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    closeModal('createGroupModal');
+                    document.getElementById('groupName').value = '';
+                    document.getElementById('groupDescription').value = '';
+                    await loadChats();
+                    showNotification('Success', 'Group created successfully!');
+                } else {
+                    alert(data.error || 'Failed to create group');
+                }
+            } catch (error) {
+                console.error('Create group error:', error);
+                alert('Failed to create group');
+            }
+        }
+
+        // ========== Messages ==========
+
+        window.messagesOffset = 0;
+        window.hasMoreMessages = true;
+        window.isLoadingMessages = false;
+
+        async function loadMessages(chatId) {
+            try {
+                window.messagesOffset = 0;
+                window.hasMoreMessages = true;
+
+                const response = await fetch(API_URL + `/chats/${chatId}/messages?limit=20`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                const data = await response.json();
+                const messages = data.messages || [];
+                console.log('📬 Loaded messages:', messages.length);
+                renderMessages(messages);
+
+                window.messagesOffset = messages.length;
+                if (messages.length < 20) window.hasMoreMessages = false;
+
+                // Send read receipts
+                const messageIds = messages.filter(m => m.sender.id !== currentUser.id).map(m => m.id);
+                if (messageIds.length > 0 && ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'read_receipt',
+                        chat_id: chatId,
+                        message_ids: messageIds
+                    }));
+                }
+            } catch (error) {
+                console.error('Error loading messages:', error);
+            }
+        }
+
+        async function loadOlderMessages(chatId) {
+            if (window.isLoadingMessages || !window.hasMoreMessages || !chatId) return;
+            window.isLoadingMessages = true;
+
+            const container = document.getElementById('messagesContainer');
+            const oldScrollHeight = container.scrollHeight;
+
+            try {
+                const response = await fetch(API_URL + `/chats/${chatId}/messages?limit=20&offset=${window.messagesOffset}`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const data = await response.json();
+                const messages = data.messages || [];
+
+                if (messages.length < 20) {
+                    window.hasMoreMessages = false;
+                }
+
+                if (messages.length > 0) {
+                    window.messagesOffset += messages.length;
+
+                    const elements = messages.map(m => createMessageElement(m));
+                    container.prepend(...elements);
+
+                    // Maintain scroll position seamlessly
+                    container.scrollTop = container.scrollHeight - oldScrollHeight;
+                }
+            } catch (error) {
+                console.error('Error loading older messages:', error);
+            } finally {
+                window.isLoadingMessages = false;
+            }
+        }
+
+        // Lazy load infinite scroll hook
+        document.addEventListener('scroll', function (e) {
+            if (e.target && e.target.id === 'messagesContainer') {
+                if (e.target.scrollTop <= 150) {
+                    if (window.activeChat && !window.isLoadingMessages && window.hasMoreMessages) {
+                        loadOlderMessages(window.activeChat.id);
+                    }
+                }
+            }
+        }, true);
+
+        function renderMessages(messages) {
+            const container = document.getElementById('messagesContainer');
+            container.innerHTML = '';
+
+            if (messages.length === 0) {
+                container.innerHTML = `
+                    <div style="text-align: center; color: #888; padding: 40px;">
+                        <p style="font-size: 40px; margin-bottom: 10px;">💬</p>
+                        <p>No messages yet</p>
+                        <p style="font-size: 12px; margin-top: 5px;">Start the conversation!</p>
+                    </div>
+                `;
+                return;
+            }
+
+            messages.forEach(message => {
+                const messageEl = createMessageElement(message);
+                container.appendChild(messageEl);
+            });
+
+            container.scrollTop = container.scrollHeight;
+        }
+
+
+        function createMessageElement(message) {
+            const messageEl = document.createElement('div');
+            const isSent = message.sender.id === currentUser.id;
+            messageEl.className = 'message' + (isSent ? ' sent' : '');
+            messageEl.dataset.messageId = message.id;
+            messageEl.id = `msg-${message.id}`;
+
+            messageEl.addEventListener('contextmenu', (e) => {
+                showMessageContextMenu(e, message.id);
+            });
+
+            const avatarContent = message.sender.avatar_url
+                ? `<img src="${message.sender.avatar_url.startsWith('http') ? message.sender.avatar_url : API_URL + message.sender.avatar_url}" alt="${message.sender.username}" loading="lazy" onerror="this.parentElement.innerHTML='${message.sender.username[0].toUpperCase()}'">`
+                : message.sender.username[0].toUpperCase();
+
+            const time = new Date(message.created_at).toLocaleTimeString('en-US', {
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+
+            // ✅ BUILD REPLY HTML using reply_to_data from backend
+            let replyHtml = '';
+            if (message.reply_to_data) {
+                const replyData = message.reply_to_data;
+                const replyText = replyData.content ?
+                    (replyData.content.length > 50 ? replyData.content.substring(0, 50) + '...' : replyData.content)
+                    : '[Media]';
+
+                replyHtml = `
+                    <div class="message-reply-reference" onclick="jumpToMessage('${replyData.id}')" style="
+                        background: rgba(218, 165, 32, 0.1);
+                        border-left: 3px solid #DAA520;
+                        padding: 8px 12px;
+                        margin-bottom: 8px;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        transition: background 0.2s;
+                    " onmouseover="this.style.background='rgba(218, 165, 32, 0.15)'" onmouseout="this.style.background='rgba(218, 165, 32, 0.1)'">
+                        <div style="font-size: 11px; color: #DAA520; font-weight: 700; margin-bottom: 3px;">
+                            ${escapeHtml(replyData.sender?.username || 'User')}
+                        </div>
+                        <div style="font-size: 13px; color: #aaa; opacity: 0.9;">
+                            ${escapeHtml(replyText)}
+                        </div>
+                    </div>
+                `;
+            }
+
+            let attachmentsHtml = '';
+            if (message.attachments && message.attachments.length > 0) {
+                attachmentsHtml = '<div class="message-attachments">';
+
+                message.attachments.forEach(att => {
+                    console.log('📎 Rendering attachment:', att);
+
+                    if (!att || !att.id) {
+                        console.warn('⚠️ Invalid attachment data:', att);
+                        return;
+                    }
+
+                    if (att.type === 'image') {
+                        // ✅ Fix URL construction - prepend server URL if not absolute
+                        const imageUrl = att.url.startsWith('http') ? att.url : `${window.location.origin}${att.url}`;
+                        const thumbUrl = att.thumbnail_url
+                            ? (att.thumbnail_url.startsWith('http') ? att.thumbnail_url : `${window.location.origin}${att.thumbnail_url}`)
+                            : imageUrl;
+
+                        attachmentsHtml += `
+                            <div class="message-attachment">
+                            <img 
+                                src="${imageUrl}"
+                                data-full="${imageUrl}"
+                                alt="${escapeHtml(att.filename || 'Image')}"
+                                class="chat-thumb-img"
+                                loading="lazy"
+                                decoding="async"
+                                onclick="openImageViewer('${imageUrl}', '${escapeHtml(att.filename || 'Image')}')"
+                                style="cursor:pointer;max-width:300px;max-height:300px;border-radius:8px;"
+                                onerror="this.parentElement.innerHTML='<div style=\\'padding:10px;background:rgba(229, 72, 77,0.1);border-radius:8px;color:#F0787C;text-align:center\\'>❌ Image not available<br><small style=\\'color:#888\\'>${escapeHtml(att.filename || 'Unknown')}</small></div>'"
+                            >
+                            </div>
+                        `;
+                    } else if (att.type === 'video') {
+                        const videoUrl = att.url.startsWith('http') ? att.url : `${window.location.origin}${att.url}`;
+                        attachmentsHtml += `
+                            <div class="message-attachment">
+                                <video 
+                                    src="${videoUrl}" 
+                                    controls 
+                                    style="max-width: 300px; border-radius: 8px;"
+                                    onerror="this.parentElement.innerHTML='<div style=\\'padding:10px;background:rgba(229, 72, 77,0.1);border-radius:8px;color:#F0787C;text-align:center\\'>❌ Video not available</div>'"
+                                ></video>
+                            </div>
+                        `;
+                    } else if (message.message_type === 'voice' || att.type === 'audio') {
+                        const duration = att.duration || '0:00';
+                        const audioId = `audio_${message.id}_${att.id}`;
+                        const audioUrl = att.url.startsWith('http') ? att.url : `${window.location.origin}${att.url}`;
+
+                        attachmentsHtml += `
+                            <div class="voice-message">
+                                <button class="voice-play-btn" onclick="toggleAudioPlayback('${audioId}')">▶️</button>
+                                <div class="voice-waveform">
+                                    <div class="voice-progress" id="progress_${audioId}" style="width: 0%"></div>
+                                </div>
+                                <span class="voice-duration" id="duration_${audioId}">${duration}</span>
+                                <audio id="${audioId}" preload="metadata" onerror="console.error('❌ Audio load failed:', this.src); this.parentElement.innerHTML='<div style=\\'padding:5px;color:#F0787C;font-size:12px\\'>❌ Audio unavailable</div>'">
+                                    <source src="${audioUrl}" type="audio/webm">
+                                    <source src="${audioUrl}" type="audio/mpeg">
+                                    <source src="${audioUrl}" type="audio/ogg">
+                                </audio>
+                            </div>
+                        `;
+                    } else {
+                        let icon = '📄';
+                        if (att.type === 'audio') icon = '🎵';
+                        else if (att.filename?.endsWith('.pdf')) icon = '📕';
+                        else if (att.filename?.endsWith('.zip') || att.filename?.endsWith('.rar')) icon = '📦';
+                        else if (att.filename?.endsWith('.doc') || att.filename?.endsWith('.docx')) icon = '📘';
+                        else if (att.filename?.endsWith('.xls') || att.filename?.endsWith('.xlsx')) icon = '📗';
+                        else if (att.type === 'archive') icon = '📦';
+
+                        const fileUrl = att.url.startsWith('http') ? att.url : `${window.location.origin}${att.url}`;
+                        const fileSize = formatFileSize(att.size || 0);
+                        // Encrypted if flagged in message or tracked locally this session
+                        const _isEnc = message.encrypted === true ||
+                            (window._encryptedFileIds && window._encryptedFileIds.has(att.id));
+
+                        attachmentsHtml += `
+                            <div class="message-attachment" style="cursor:pointer;">
+                                <div class="attachment-icon">${_isEnc ? '🔒' : icon}</div>
+                                <div class="attachment-info">
+                                    <div class="attachment-name" title="${escapeHtml(att.filename || 'File')}">${escapeHtml(att.filename || 'File')}</div>
+                                    <div class="attachment-size">${fileSize}${_isEnc ? ' · Encrypted' : ''}</div>
+                                </div>
+                                ${_isEnc
+                                ? `<button onclick="decryptAndDownload('${fileUrl}','${escapeHtml(att.filename || 'file')}','${att.id}')" style="margin-left:8px;background:rgba(76, 175, 125,0.15);border:1px solid rgba(76, 175, 125,0.3);border-radius:8px;color:#4CB78A;font-size:12px;font-weight:700;padding:6px 12px;cursor:pointer;white-space:nowrap;">🔓 Decrypt</button>`
+                                : `<button onclick="window.open('${fileUrl}','_blank')" style="margin-left:8px;background:rgba(190, 91, 46,0.12);border:1px solid rgba(190, 91, 46,0.2);border-radius:8px;color:#C97A3D;font-size:12px;font-weight:700;padding:6px 12px;cursor:pointer;white-space:nowrap;">⬇ Download</button>`
+                            }
+                            </div>
+                        `;
+                    }
+                });
+
+                attachmentsHtml += '</div>';
+            }
+
+            // ✅ BUILD COMPLETE MESSAGE HTML WITH REPLY
+            // For E2E encrypted messages, render placeholder then async-decrypt
+            const _isEncrypted = message.encrypted === true;
+            const _msgId = `msg_text_${message.id}`;
+            const _displayText = _isEncrypted
+                ? '' // Will be filled in async
+                : (message.content ? escapeHtml(message.content) : '');
+
+            messageEl.innerHTML = `
+                <div class="message-avatar">${avatarContent}</div>
+                <div class="message-content">
+                    <div class="message-bubble">
+                        ${replyHtml}
+                        ${message.content ? `<div class="message-text" id="${_msgId}" style="${_isEncrypted ? 'color:#aaa;font-style:italic;' : ''}">${_isEncrypted ? '🔐 Decrypting...' : _displayText}</div>` : ''}
+                        ${attachmentsHtml}
+                        <div class="message-info">
+                            <span>${time}</span>
+                            ${_isEncrypted ? '<span class="encryption-badge" title="End-to-end encrypted">🔒</span>' : ''}
+                            ${message.edited ? '<span title="Edited">✏️</span>' : ''}
+                            ${isSent ? '<span class="message-status">✓✓</span>' : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // Async decrypt: replace placeholder with real content
+            if (_isEncrypted && message.content && CryptoEngine._ready) {
+                const _chatId = activeChat?.id;
+                CryptoEngine.decryptText(_chatId, message.content).then(plain => {
+                    const el = document.getElementById(_msgId);
+                    if (el) {
+                        if (plain !== null) {
+                            el.style.cssText = '';
+                            el.textContent = plain;
+                        } else {
+                            el.innerHTML = '<em style="color:#888;font-size:12px">🔒 Encrypted message (no key)</em>';
+                        }
+                    }
+                }).catch(() => { });
+            }
+
+            return messageEl;
+        }
+
+        async function handleNewMessage(data) {
+            if (!data || !data.message) return;
+
+            const msg = data.message;
+
+            // 🔒 Set up encryption key for incoming messages
+            if (CryptoEngine._ready && data.chat_id) {
+                const chat = chats.find(c => c.id === data.chat_id);
+                if (chat && chat.type === 'direct' && chat.other_user_id && !CryptoEngine.hasKey(chat.id)) {
+                    await CryptoEngine.setupChatKey(chat.id, chat.other_user_id).catch(() => { });
+                } else if (chat && chat.type === 'group' && chat.member_ids && !CryptoEngine.hasKey(chat.id)) {
+                    await CryptoEngine.setupGroupChatKey(chat.id, chat.member_ids).catch(() => { });
+                }
+            }
+
+            // ⭐ Ensure reply_to_data always exists in the message object
+            const messageObj = {
+                ...msg,
+                reply_to_data: msg.reply_to_data || null
+            };
+
+            if (activeChat && data.chat_id === activeChat.id) {
+                const container = document.getElementById('messagesContainer');
+
+                // Remove "no messages" placeholder
+                if (container.querySelector('.no-messages')) {
+                    container.innerHTML = '';
+                }
+
+                // Create message element WITH reply info
+                const newMessage = createMessageElement(messageObj);
+                container.appendChild(newMessage);
+
+                // Auto scroll
+                container.scrollTop = container.scrollHeight;
+
+                // Send read receipt
+                if (msg.sender.id !== currentUser.id && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: "read_receipt",
+                        chat_id: data.chat_id,
+                        message_ids: [msg.id]
+                    }));
+                }
+            }
+
+            // ✅ Update chat preview in contact list immediately
+            updateChatPreviewInList(data.chat_id, {
+                last_message: data.last_message_preview || msg.content || '',
+                last_message_type: data.last_message_type || msg.message_type || 'text',
+                last_message_time: msg.created_at
+            });
+
+            // Desktop notification for other chats
+            if (!activeChat || data.chat_id !== activeChat.id) {
+                showNotification(
+                    msg.sender.username,
+                    msg.content || 'Sent an attachment'
+                );
+            }
+        }
+
+        // Helper function to update chat preview without reloading all chats
+        async function updateChatPreviewInList(chatId, messageInfo) {
+            try {
+                const chatIndex = chats.findIndex(c => c.id === chatId);
+                if (chatIndex !== -1) {
+                    // Update local chat data
+                    chats[chatIndex].last_message = messageInfo.last_message;
+                    chats[chatIndex].last_message_type = messageInfo.last_message_type;
+                    chats[chatIndex].last_message_time = messageInfo.last_message_time;
+
+                    // Move chat to top
+                    const [updatedChat] = chats.splice(chatIndex, 1);
+                    chats.unshift(updatedChat);
+
+                    // Re-render chat list
+                    await renderChats();
+                }
+            } catch (error) {
+                console.error('Error updating chat preview:', error);
+            }
+        }
+
+
+        function handleMessageRead(data) {
+            // Update message read status
+            if (activeChat && data.chat_id === activeChat.id) {
+                data.message_ids.forEach(msgId => {
+                    const messageEl = document.querySelector(`[data-message-id="${msgId}"]`);
+                    if (messageEl) {
+                        const checkmark = messageEl.querySelector('.message-info span:last-child');
+                        if (checkmark && checkmark.textContent === '✓✓') {
+                            checkmark.style.color = '#4CAF50';
+                        }
+                    }
+                });
+            }
+        }
+
+        // ==================== FILE CONVERSION FUNCTIONS ====================
+        async function loadConversionFormats(fileExtension, fileId) {
+            try {
+                const response = await fetch(`${API_URL}/files/conversion-formats?ext=${fileExtension}`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                if (!response.ok) throw new Error('Failed to load formats');
+
+                const data = await response.json();
+                return data.formats || [];
+            } catch (error) {
+                console.error('Load formats error:', error);
+                return [];
+            }
+        }
+
+        function handleFormatSelection() {
+            const select = document.getElementById('targetFormatSelect');
+            const convertBtn = document.getElementById('convertFileBtn');
+
+            if (!select || !convertBtn) return;
+
+            const hasSelection = select.value && select.value !== '';
+            convertBtn.disabled = !hasSelection;
+
+            console.log('🔄 Format selected:', select.value, '| Button enabled:', hasSelection);
+        }
+
+        async function convertSelectedFile() {
+            if (selectedFiles.length === 0 || !window.currentFileForConversion) {
+                console.warn('⚠️ No file to convert');
+                showError('No file selected for conversion');
+                return;
+            }
+
+            const file = window.currentFileForConversion;
+            const targetFormat = document.getElementById('targetFormatSelect').value;
+            const sendBtn = document.getElementById('sendBtn');
+
+            if (!targetFormat) {
+                alert('Please select a target format');
+                return;
+            }
+
+            console.log('🔄 Starting conversion:', file.name, '→', targetFormat);
+
+            const convertBtn = document.getElementById('convertFileBtn');
+            const convertBtnText = document.getElementById('convertBtnText');
+            const convertBtnSpinner = document.getElementById('convertBtnSpinner');
+            const conversionProgress = document.getElementById('conversionProgress');
+            const progressFill = document.getElementById('progressFill');
+            const progressText = document.getElementById('progressText');
+
+            try {
+                // 🔒 Disable send while converting
+                sendBtn.disabled = true;
+                convertBtn.disabled = true;
+                convertBtnText.style.display = 'none';
+                convertBtnSpinner.style.display = 'inline-block';
+                conversionProgress.style.display = 'flex';
+
+                // Fake progress bar
+                let progress = 0;
+                const progressInterval = setInterval(() => {
+                    progress += 10;
+                    if (progress <= 90) {
+                        progressFill.style.width = `${progress}%`;
+                        progressText.textContent = `Converting... ${progress}%`;
+                    }
+                }, 300);
+
+                // 1️⃣ Upload original file
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const uploadResponse = await fetch(`${API_URL}/upload/file`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${authToken}` },
+                    body: formData
+                });
+
+                if (!uploadResponse.ok) throw new Error('Upload failed');
+
+                const uploadData = await uploadResponse.json();
+                const fileId = uploadData.file.id;
+
+                // 2️⃣ Convert file
+                const convertResponse = await fetch(`${API_URL}/files/convert`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        file_id: fileId,
+                        target_format: targetFormat
+                    })
+                });
+
+                clearInterval(progressInterval);
+
+                if (!convertResponse.ok) {
+                    const err = await convertResponse.json();
+                    throw new Error(err.error || 'Conversion failed');
+                }
+
+                const convertData = await convertResponse.json();
+
+                // 3️⃣ Use server-converted file directly (no re-upload)
+                let downloadUrl = convertData.converted_file.url;
+                if (!downloadUrl.startsWith('http')) {
+                    downloadUrl = downloadUrl.startsWith('/api')
+                        ? downloadUrl
+                        : `/api${downloadUrl}`;
+                }
+
+                // Store a reference object that points to server-converted file
+                const convertedRef = {
+                    __converted: true,
+                    serverId: convertData.converted_file.id,
+                    name: convertData.converted_file.filename,
+                    url: downloadUrl,
+                    mime: convertData.converted_file.type || '',
+                    fileType: convertData.converted_file.type || 'file'  // ✅ Store file type for message_type detection
+                };
+
+                // 4️⃣ Replace original file in selectedFiles
+                const index = selectedFiles.findIndex(f => f.name === file.name);
+                if (index !== -1) {
+                    selectedFiles[index] = convertedRef;
+                }
+
+                // 5️⃣ Update preview
+                const filePreviewItems = document.getElementById('filePreviewItems');
+                // Ensure preview container is restored after conversion
+                const filePreviewContainer = document.getElementById('filePreviewContainer');
+                if (filePreviewContainer) {
+                    filePreviewContainer.style.display = 'flex';
+                }
+
+                // Replace original preview with converted file preview
+                filePreviewItems.innerHTML = '';
+                await addFilePreview(convertedRef);
+
+                progressFill.style.width = '100%';
+                progressText.textContent = 'Conversion complete ✓';
+
+                showNotification(
+                    'Success',
+                    `File converted to ${targetFormat.toUpperCase()}`
+                );
+
+                setTimeout(() => {
+                    document.getElementById('conversionPanel').style.display = 'none';
+                    conversionProgress.style.display = 'none';
+                    convertBtnText.style.display = 'inline';
+                    convertBtnSpinner.style.display = 'none';
+                    convertBtn.disabled = false;
+
+                    // ✅ Enable send ONLY after replacement
+                    sendBtn.disabled = false;
+                }, 800);
+
+            } catch (error) {
+                console.error('❌ Conversion error:', error);
+                showError('Conversion failed: ' + error.message);
+
+                conversionProgress.style.display = 'none';
+                convertBtnText.style.display = 'inline';
+                convertBtnSpinner.style.display = 'none';
+                convertBtn.disabled = false;
+                sendBtn.disabled = false;
+            }
+        }
+
+        async function updateFilePreviewAfterConversion(oldFileId, newFile) {
+            // Remove old preview
+            const oldItem = document.querySelector(`[data-file-id="${oldFileId}"]`);
+            if (oldItem) oldItem.remove();
+
+            // Update attachment list
+            const index = attachedFiles.findIndex(f => f.id === oldFileId);
+            if (index !== -1) {
+                attachedFiles[index] = newFile;
+            }
+
+            // Add new preview
+            const container = document.getElementById('filePreviewItems');
+            const item = createFilePreviewItem(newFile);
+            container.insertBefore(item, container.firstChild);
+        }
+
+        async function showConversionPanel(file, fileExtension) {
+            const panel = document.getElementById('conversionPanel');
+            const currentFormatSpan = document.getElementById('currentFormat');
+            const targetSelect = document.getElementById('targetFormatSelect');
+            const sendBtn = document.getElementById('sendBtn');
+
+            if (!panel || !currentFormatSpan || !targetSelect) {
+                console.warn('⚠️ Conversion panel elements not found');
+                return;
+            }
+
+            console.log('🔄 Setting up conversion panel for:', fileExtension);
+
+            // Store file reference for conversion
+            window.currentFileForConversion = file;
+
+            sendBtn.disabled = false; // Allow sending even without conversion
+
+            currentFormatSpan.textContent = fileExtension.toUpperCase();
+
+            // Load conversion formats from backend API
+            const formats = await loadConversionFormats(fileExtension, null);
+
+            console.log('✅ Available formats for', fileExtension, ':', formats);
+
+            targetSelect.innerHTML = '<option value="">Select format to convert</option>';
+            formats.forEach(format => {
+                const option = document.createElement('option');
+                option.value = format;
+                option.textContent = `.${format.toUpperCase()}`;
+                targetSelect.appendChild(option);
+            });
+
+            if (formats.length > 0) {
+                panel.style.display = 'block';
+                console.log('✅ Conversion panel shown with', formats.length, 'formats');
+            } else {
+                panel.style.display = 'none';
+                console.log('ℹ️ No conversion formats available for', fileExtension);
+            }
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const content = input.value.trim();
+
+            if (!content && selectedFiles.length === 0) return;
+            if (!activeChat) {
+                showError('No active chat selected');
+                return;
+            }
+
+            const sendBtn = document.getElementById('sendBtn');
+            sendBtn.disabled = true;
+
+            try {
+                let attachmentIds = [];
+                let attachmentTypes = [];  // ✅ Store file types
+
+                // Upload files if any
+                if (selectedFiles.length > 0) {
+                    console.log(`📤 Uploading ${selectedFiles.length} files...`);
+
+                    // Show uploading indicator
+                    showNotification('Uploading', `Uploading ${selectedFiles.length} file(s)...`);
+
+                    try {
+                        const uploadResult = await uploadFiles();
+                        attachmentIds = uploadResult.ids || [];
+                        attachmentTypes = uploadResult.types || [];  // ✅ Get file types
+
+                        if (attachmentIds.length === 0) {
+                            throw new Error('No files were uploaded successfully');
+                        }
+
+                        // Verify we got valid IDs
+                        if (attachmentIds.some(id => !id || id === 'undefined')) {
+                            throw new Error('Invalid file IDs received from server');
+                        }
+
+                        console.log('✅ Files uploaded successfully, IDs:', attachmentIds, 'Types:', attachmentTypes);
+
+                        // Clear file selection
+                        selectedFiles = [];
+                        const filePreviewItems = document.getElementById('filePreviewItems');
+                        if (filePreviewItems) {
+                            filePreviewItems.innerHTML = '';
+                        }
+                        document.getElementById('filePreviewContainer').style.display = 'none';
+
+                        showNotification('Success', `${attachmentIds.length} file(s) uploaded`);
+
+                    } catch (uploadError) {
+                        console.error('❌ File upload failed:', uploadError);
+                        showError('Failed to upload files: ' + uploadError.message);
+                        sendBtn.disabled = false;
+                        return; // Stop here if upload fails
+                    }
+                }
+
+                // Send message via WebSocket
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    // 🔒 Encrypt message content if E2E key is available
+                    let plainContent = content || '';
+                    let encryptedContent = plainContent;
+                    let isE2eEncrypted = false;
+
+                    if (plainContent && CryptoEngine.hasKey(activeChat.id)) {
+                        const ct = await CryptoEngine.encryptText(activeChat.id, plainContent);
+                        if (ct) {
+                            encryptedContent = ct;
+                            isE2eEncrypted = true;
+                        }
+                    }
+
+                    // If any attached file was encrypted, mark the whole message encrypted
+                    if (!isE2eEncrypted && attachmentIds.length > 0 && window._encryptedFileIds) {
+                        isE2eEncrypted = attachmentIds.some(id => window._encryptedFileIds.has(id));
+                    }
+
+                    // ✅ Determine message type based on uploaded file types
+                    let messageType = 'text';
+                    if (attachmentIds.length > 0) {
+                        // Use first file's type, or 'file' if mixed types
+                        const firstType = attachmentTypes[0] || 'file';
+                        const allSameType = attachmentTypes.every(t => t === firstType);
+                        messageType = allSameType ? firstType : 'file';
+                    }
+
+                    const messageData = {
+                        type: 'message',
+                        chat_id: activeChat.id,
+                        content: encryptedContent,
+                        encrypted: isE2eEncrypted,
+                        message_type: messageType,  // ✅ Use detected type
+                        attachments: attachmentIds,
+                        reply_to: replyToMessageId || null
+                    };
+
+                    console.log('📤 Sending message via WebSocket:', messageData);
+                    ws.send(JSON.stringify(messageData));
+
+                    // Clear input
+                    input.value = '';
+                    input.style.height = 'auto';
+
+                    // Clear reply indicator
+                    if (replyToMessageId) {
+                        cancelReply();
+                    }
+
+                    // Stop typing indicator
+                    if (isTyping) {
+                        isTyping = false;
+                        ws.send(JSON.stringify({
+                            type: 'typing',
+                            chat_id: activeChat.id,
+                            is_typing: false
+                        }));
+                    }
+
+                    console.log('✅ Message sent successfully');
+
+                } else {
+                    throw new Error('WebSocket not connected. Please check your connection.');
+                }
+
+            } catch (error) {
+                console.error('❌ Send message error:', error);
+                showError('Failed to send message: ' + error.message);
+            } finally {
+                sendBtn.disabled = false;
+            }
+            // Clear input
+            input.value = '';
+            input.style.height = 'auto';
+
+            // Clear reply indicator
+            if (replyToMessageId) {
+                cancelReply();
+            }
+
+            // ✅ NEW: Reset button visibility after sending
+            updateSendButtonVisibility();
+
+            // Stop typing indicator
+            if (isTyping) {
+                isTyping = false;
+                ws.send(JSON.stringify({
+                    type: 'typing',
+                    chat_id: activeChat.id,
+                    is_typing: false
+                }));
+            }
+        }
+
+        // Toggle between send and voice button based on text
+        document.getElementById('messageInput').addEventListener('input', function () {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
+
+            updateSendButtonVisibility();
+
+            // Typing indicator logic
+            const hasText = this.value.trim().length > 0;
+            if (activeChat && ws && ws.readyState === WebSocket.OPEN) {
+                if (!isTyping && hasText) {
+                    isTyping = true;
+                    ws.send(JSON.stringify({
+                        type: 'typing',
+                        chat_id: activeChat.id,
+                        is_typing: true
+                    }));
+                }
+
+                clearTimeout(typingTimeout);
+                typingTimeout = setTimeout(() => {
+                    isTyping = false;
+                    ws.send(JSON.stringify({
+                        type: 'typing',
+                        chat_id: activeChat.id,
+                        is_typing: false
+                    }));
+                }, 2000);
+            }
+        });
+
+        // NEW FUNCTION: Check if we should show send or voice button
+        function updateSendButtonVisibility() {
+            const messageInput = document.getElementById('messageInput');
+            const sendBtn = document.getElementById('sendBtn');
+            const voiceBtn = document.getElementById('voiceRecordBtn');
+
+            // Check if there's text OR files selected
+            const hasText = messageInput.value.trim().length > 0;
+            const hasFiles = selectedFiles.length > 0;
+            const shouldShowSend = hasText || hasFiles;
+
+            if (shouldShowSend) {
+                voiceBtn.style.display = 'none';
+                sendBtn.style.display = 'flex';
+            } else {
+                sendBtn.style.display = 'none';
+                voiceBtn.style.display = 'flex';
+            }
+        }
+
+        document.getElementById('messageInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        function handleTyping(data) {
+            if (!activeChat || data.chat_id !== activeChat.id) return;
+
+            const indicator = document.getElementById('typingIndicator');
+
+            if (typingTimeouts[data.user_id]) {
+                clearTimeout(typingTimeouts[data.user_id]);
+            }
+
+            if (data.is_typing) {
+                typingUsers.add(data.user_id);
+                indicator.style.display = 'block';
+
+                typingTimeouts[data.user_id] = setTimeout(() => {
+                    typingUsers.delete(data.user_id);
+                    if (typingUsers.size === 0) {
+                        indicator.style.display = 'none';
+                    }
+                }, 3000);
+            } else {
+                typingUsers.delete(data.user_id);
+                if (typingUsers.size === 0) {
+                    indicator.style.display = 'none';
+                }
+            }
+        }
+
+        function handleUserStatus(data) {
+            chats = chats.map(chat => {
+                if (chat.id === data.user_id || (chat.type === 'direct' && chat.other_user_id === data.user_id)) {
+                    return { ...chat, status: data.status, last_seen: data.last_seen };
+                }
+                return chat;
+            });
+
+            if (activeChat && activeChat.other_user_id === data.user_id) {
+                document.getElementById('activeChatStatus').textContent = data.status;
+            }
+
+            renderChats();
+        }
+
+        // ========== File Uploads ==========
+        function triggerFileUpload() {
+            console.log('📎 triggerFileUpload called');
+            const fileInput = document.getElementById('fileInput');
+            if (!fileInput) {
+                showError('File input not found');
+                return;
+            }
+            fileInput.value = '';
+            fileInput.click();
+        }
+
+        function triggerImageUpload() {
+            console.log('🖼️ triggerImageUpload called');
+            const imageInput = document.getElementById('imageInput');
+            if (!imageInput) {
+                showError('Image input not found');
+                return;
+            }
+            imageInput.value = '';
+            imageInput.click();
+        }
+
+        function resetFileInput(input) {
+            setTimeout(() => {
+                input.value = '';
+            }, 500);
+        }
+
+        async function handleFileSelect(event) {
+            console.log('📁 ===== FILE SELECT STARTED =====');
+
+            const files = Array.from(event.target.files);
+            console.log('📱 Files selected:', files.length);
+
+            if (files.length === 0) {
+                console.warn('⚠️ No files selected');
+                return;
+            }
+
+            // ✅ MOBILE: Better visual feedback
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+            if (isMobile) {
+                // Provide immediate feedback on mobile
+                showNotification('Files Selected', `${files.length} file(s) - Processing...`);
+            } else {
+                showNotification('Processing', `Preparing ${files.length} file(s)...`);
+            }
+
+            const container = document.getElementById('filePreviewContainer');
+            const filePreviewItems = document.getElementById('filePreviewItems');
+
+            if (!container || !filePreviewItems) {
+                console.error('❌ Preview containers not found!');
+                showError('Error: Preview container missing');
+                return;
+            }
+
+            console.log('📦 Containers found');
+
+            // ✅ CRITICAL FIX: Clear all previous file previews before adding new ones
+            selectedFiles = [];
+            filePreviewItems.innerHTML = '';
+            // Clean up any legacy previews that were attached directly to the container
+            container.querySelectorAll('.file-preview-item').forEach(item => item.remove());
+
+            // ✅ MOBILE: Force container to be visible with strong styling
+            container.style.display = 'flex';
+            container.style.visibility = 'visible';
+            container.style.opacity = '1';
+            container.style.zIndex = '10';
+
+            filePreviewItems.innerHTML = '<div style="padding:10px;color:#C97A3D;font-size:14px;font-weight:600;">📦 Processing files...</div>';
+
+            console.log('✅ Container forced visible');
+
+            let successCount = 0;
+            let errorFiles = [];
+
+            for (const file of files) {
+                console.log('📄 Processing:', file.name, file.type, formatFileSize(file.size));
+
+                if (selectedFiles.some(f => f.name === file.name && f.size === file.size)) {
+                    console.log('⏭️ Duplicate file ignored:', file.name);
+                    continue;
+                }
+
+                if (file.size > 100 * 1024 * 1024) {
+                    console.error('❌ File too large:', file.name);
+                    errorFiles.push(`${file.name} (too large)`);
+                    continue;
+                }
+
+                try {
+                    selectedFiles.push(file);
+
+                    try {
+                        await addFilePreview(file);
+                    } catch (e) {
+                        console.warn('⚠️ Preview failed (mobile-safe):', e);
+                    }
+                    successCount++;
+                } catch (error) {
+                    console.error('❌ File processing error:', error);
+                    errorFiles.push(file.name);
+                }
+            }
+
+            const processingMsg = filePreviewItems.querySelector('div');
+            if (processingMsg && processingMsg.textContent.includes('Processing')) {
+                processingMsg.remove();
+            }
+
+            if (selectedFiles.length > 0) {
+                container.style.display = 'flex';
+                console.log('✅ Files ready:', selectedFiles.length);
+
+                // ✅ MOBILE: More visible success notification
+                if (isMobile) {
+                    showNotification('✅ Ready to Send', `${successCount} file(s) attached`);
+                } else {
+                    showNotification('Ready', `${successCount} file(s) ready to send`);
+                }
+
+                updateSendButtonVisibility();
+
+                // ✅ CRITICAL FIX: Show conversion panel for FIRST file
+                if (selectedFiles.length === 1) {
+                    const firstFile = selectedFiles[0];
+                    const extension = firstFile.name.split('.').pop().toLowerCase();
+
+                    console.log('🔄 Single file selected - showing conversion for:', extension);
+                    await showConversionPanel(firstFile, extension);
+                } else {
+                    // ✅ Multiple files - hide conversion panel
+                    console.log('📎 Multiple files selected - hiding conversion panel');
+                    hideConversionPanel();
+                }
+            } else {
+                container.style.display = 'none';
+                hideConversionPanel();
+                console.warn('⚠️ No files were successfully processed');
+            }
+            if (errorFiles.length > 0) {
+                showError(`Failed to process: ${errorFiles.join(', ')}`);
+            }
+
+            console.log('📁 ===== FILE SELECT COMPLETE =====');
+            event.target.value = '';
+        }
+        // ==================== FILE CONVERSION HELPER ====================
+        async function showConversionPanelForFile(file, fileExtension) {
+            const panel = document.getElementById('conversionPanel');
+            const currentFormatSpan = document.getElementById('currentFormat');
+            const targetSelect = document.getElementById('targetFormatSelect');
+            const sendBtn = document.getElementById('sendBtn');
+
+            if (!panel || !currentFormatSpan || !targetSelect) {
+                console.warn('⚠️ Conversion panel elements not found');
+                return;
+            }
+
+            console.log('🔄 Checking conversion options for:', fileExtension);
+
+            // Disable send button while conversion options are shown
+            sendBtn.disabled = true;
+
+            currentFormatSpan.textContent = fileExtension.toUpperCase();
+
+            try {
+                // Load supported formats from backend
+                const response = await fetch(`${API_URL}/files/conversion-formats?ext=${fileExtension}`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                if (!response.ok) throw new Error('Failed to load formats');
+
+                const data = await response.json();
+                const formats = data.formats || [];
+
+                console.log('✅ Available formats:', formats);
+
+                targetSelect.innerHTML = '<option value="">Select format to convert</option>';
+                formats.forEach(format => {
+                    const option = document.createElement('option');
+                    option.value = format;
+                    option.textContent = `.${format.toUpperCase()}`;
+                    targetSelect.appendChild(option);
+                });
+
+                // Show panel only if conversion formats exist
+                if (formats.length > 0) {
+                    panel.style.display = 'block';
+                    console.log('✅ Conversion panel shown with', formats.length, 'formats');
+                } else {
+                    panel.style.display = 'none';
+                    sendBtn.disabled = false; // Enable send if no conversion needed
+                    console.log('ℹ️ No conversion formats available');
+                }
+
+            } catch (error) {
+                console.error('❌ Failed to load conversion formats:', error);
+                panel.style.display = 'none';
+                sendBtn.disabled = false; // Enable send on error
+            }
+        }
+
+        async function addFilePreviewForConverted(fileObj) {
+            const container = document.getElementById('filePreviewItems');
+            if (!container) return;
+
+            const item = document.createElement('div');
+            item.className = 'file-preview-item';
+            item.dataset.fileName = fileObj.name;
+
+            const ext = fileObj.name.split('.').pop().toLowerCase();
+            const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext);
+
+            if (isImage) {
+                const img = document.createElement('img');
+                img.src = fileObj.url;
+                img.alt = fileObj.name;
+                item.appendChild(img);
+            } else {
+                const icon = document.createElement('div');
+                icon.className = 'file-icon';
+                icon.textContent = getFileIcon(ext);
+                icon.style.fontSize = '36px';
+                item.appendChild(icon);
+            }
+
+            // Remove button
+            const removeBtn = document.createElement('div');
+            removeBtn.className = 'file-preview-remove';
+            removeBtn.innerHTML = '✕';
+            removeBtn.onclick = (e) => {
+                e.stopPropagation();
+                removeFileFromPreview(fileObj.name);
+            };
+            item.appendChild(removeBtn);
+
+            container.appendChild(item);
+        }
+
+        function getFileIcon(extension) {
+            const icons = {
+                pdf: '📄', doc: '📝', docx: '📝', txt: '📝',
+                xls: '📊', xlsx: '📊', csv: '📊',
+                ppt: '📽️', pptx: '📽️',
+                zip: '🗜️', rar: '🗜️',
+                mp3: '🎵', wav: '🎵', ogg: '🎵',
+                mp4: '🎬', avi: '🎬', mov: '🎬'
+            };
+            return icons[extension] || '📁';
+        }
+        function setupFileInputsOnce() {
+            // This function is no longer needed - listeners are attached in DOMContentLoaded
+            console.log('⚠️ setupFileInputsOnce called but listeners already attached in DOMContentLoaded');
+        }
+
+        // ✅ NEW: Add CSS for loading modal animation (only add once)
+        if (!document.getElementById('file-select-styles')) {
+            const style = document.createElement('style');
+            style.id = 'file-select-styles';
+            style.textContent = `
+                @keyframes spin {
+                    0% { transform: rotate(0deg); }
+                    100% { transform: rotate(360deg); }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
+        // ===== IMAGE COMPRESSION FOR MOBILE =====
+
+        async function compressImage(file) {
+            return new Promise((resolve, reject) => {
+                console.log('🔄 Starting image compression for:', file.name);
+
+                const reader = new FileReader();
+
+                reader.onload = (e) => {
+                    const img = new Image();
+
+                    img.onload = () => {
+                        try {
+                            const canvas = document.createElement('canvas');
+                            let width = img.width;
+                            let height = img.height;
+
+                            // Max dimensions for mobile (1920px)
+                            const maxDimension = 1920;
+
+                            if (width > maxDimension || height > maxDimension) {
+                                if (width > height) {
+                                    height = (height / width) * maxDimension;
+                                    width = maxDimension;
+                                } else {
+                                    width = (width / height) * maxDimension;
+                                    height = maxDimension;
+                                }
+                            }
+
+                            canvas.width = width;
+                            canvas.height = height;
+
+                            const ctx = canvas.getContext('2d');
+                            ctx.drawImage(img, 0, 0, width, height);
+
+                            canvas.toBlob((blob) => {
+                                if (blob) {
+                                    const compressedFile = new File([blob], file.name, {
+                                        type: 'image/jpeg',
+                                        lastModified: Date.now()
+                                    });
+
+                                    console.log('✅ Compressed:', file.size, '→', compressedFile.size);
+                                    resolve(compressedFile);
+                                } else {
+                                    reject(new Error('Compression failed - no blob'));
+                                }
+                            }, 'image/jpeg', 0.85);
+
+                        } catch (error) {
+                            console.error('❌ Canvas error:', error);
+                            reject(error);
+                        }
+                    };
+
+                    img.onerror = (error) => {
+                        console.error('❌ Image load error:', error);
+                        reject(new Error('Image load failed'));
+                    };
+
+                    img.src = e.target.result;
+                };
+
+                reader.onerror = (error) => {
+                    console.error('❌ FileReader error:', error);
+                    reject(new Error('FileReader failed'));
+                };
+
+                reader.readAsDataURL(file);
+            });
+        }
+
+        // ===== FILE PREVIEW RENDERING =====
+
+        async function addFilePreview(file) {
+            const container = document.getElementById('filePreviewContainer');
+            const filePreviewItems = document.getElementById('filePreviewItems');
+
+            if (!container || !filePreviewItems) {
+                console.error('❌ Preview container missing!');
+                return;
+            }
+
+            const previewItem = document.createElement('div');
+            previewItem.className = 'file-preview-item';
+            previewItem.dataset.fileName = file.name;
+            previewItem.style.cssText = 'position: relative; width: 90px; height: 90px; min-width: 90px; flex-shrink: 0; border-radius: 12px; overflow: hidden; background: rgba(0,0,0,0.5); border: 1.5px solid rgba(218,165,32,0.2);';
+
+            console.log('📎 Adding preview for:', file.name, file.type);
+
+            // If this is a converted reference with a direct URL, use it for preview
+            if (file.__converted && file.url) {
+                const ext = (file.name.split('.').pop() || '').toLowerCase();
+                const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext);
+                if (isImage) {
+                    previewItem.innerHTML = `
+                        <img src="${file.url}" alt="${escapeHtml(file.name)}" 
+                            style="width: 100%; height: 100%; object-fit: cover;">
+                        <button class="file-preview-remove" onclick="removeFilePreview('${escapeHtml(file.name)}')">✕</button>
+                    `;
+                } else {
+                    showFileIconPreview(previewItem, { name: file.name, type: file.mime || '' });
+                }
+            } else if (file.type && file.type.startsWith('image/')) {
+                try {
+                    const dataUrl = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = (e) => resolve(e.target.result);
+                        reader.onerror = reject;
+                        reader.readAsDataURL(file);
+                    });
+
+                    previewItem.innerHTML = `
+                        <img src="${dataUrl}" alt="${escapeHtml(file.name)}" 
+                            style="width: 100%; height: 100%; object-fit: cover;">
+                        <button class="file-preview-remove" onclick="removeFilePreview('${escapeHtml(file.name)}')">✕</button>
+                    `;
+                } catch (error) {
+                    console.error('❌ Image preview error:', error);
+                    showFileIconPreview(previewItem, file);
+                }
+            } else if (file.type && file.type.startsWith('video/')) {
+                previewItem.innerHTML = `
+                    <div style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; font-size: 48px;">🎥</div>
+                    <button class="file-preview-remove" onclick="removeFilePreview('${escapeHtml(file.name)}')">✕</button>
+                    <div style="position: absolute; bottom: 5px; left: 5px; right: 5px; font-size: 10px; color: white; background: rgba(0,0,0,0.7); padding: 3px; border-radius: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(file.name.substring(0, 12))}</div>
+                `;
+            } else {
+                showFileIconPreview(previewItem, file);
+            }
+
+            filePreviewItems.appendChild(previewItem);
+
+            // Force reflow
+            filePreviewItems.offsetHeight;
+            container.style.display = 'flex';
+
+            console.log('✅ Preview added, container children:', filePreviewItems.children.length);
+        }
+
+        function showFileIconPreview(previewItem, file) {
+            let icon = '📄';
+            if (file.type.startsWith('audio/')) icon = '🎵';
+            else if (file.type.includes('pdf')) icon = '📕';
+            else if (file.type.includes('zip') || file.type.includes('rar')) icon = '📦';
+            else if (file.type.includes('word') || file.type.includes('document')) icon = '📘';
+            else if (file.type.includes('sheet') || file.type.includes('excel')) icon = '📗';
+
+            const fileName = file.name.length > 12 ? file.name.substring(0, 12) + '...' : file.name;
+
+            previewItem.innerHTML = `
+                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%;">
+                    <div style="font-size: 42px;">${icon}</div>
+                    <div style="font-size: 9px; color: white; margin-top: 5px; text-align: center; padding: 0 5px;">${escapeHtml(fileName)}</div>
+                </div>
+                <button class="file-preview-remove" onclick="removeFilePreview('${escapeHtml(file.name)}')">✕</button>
+            `;
+        }
+
+        // COMPLETE REPLACEMENT of removeFilePreview
+        function removeFilePreview(fileName) {
+            console.log('🗑️ Removing file preview:', fileName);
+
+            selectedFiles = selectedFiles.filter(f => f.name !== fileName);
+
+            const previewItems = document.querySelectorAll('.file-preview-item');
+            previewItems.forEach(item => {
+                if (item.dataset.fileName === fileName) {
+                    item.remove();
+                }
+            });
+
+            const container = document.getElementById('filePreviewContainer');
+
+            // ✅ CRITICAL: Hide conversion panel when file removed
+            if (selectedFiles.length !== 1) {
+                hideConversionPanel();
+            }
+
+            if (selectedFiles.length === 0) {
+                if (container) {
+                    container.style.display = 'none';
+                    console.log('🔒 File preview container hidden (no files)');
+                }
+                hideConversionPanel();
+                updateSendButtonVisibility();
+            } else if (selectedFiles.length === 1) {
+                // ✅ Show conversion for remaining single file
+                const remainingFile = selectedFiles[0];
+                const extension = remainingFile.name.split('.').pop().toLowerCase();
+                showConversionPanel(remainingFile, extension);
+                console.log(`📎 ${selectedFiles.length} file(s) remaining`);
+            } else {
+                console.log(`📎 ${selectedFiles.length} file(s) remaining`);
+            }
+        }
+        async function uploadFiles() {
+            const uploadedFileIds = [];
+            const uploadedFileTypes = [];  // ✅ Track file types
+            // Track which file IDs were encrypted client-side
+            if (!window._encryptedFileIds) window._encryptedFileIds = new Set();
+
+            for (let i = 0; i < selectedFiles.length; i++) {
+                const file = selectedFiles[i];
+
+                // If this is a converted file reference (not a real File object), use the server ID directly
+                if (file.__converted && file.serverId) {
+                    console.log(`✅ Using converted file ID: ${file.serverId} (${file.name})`);
+                    uploadedFileIds.push(file.serverId);
+                    uploadedFileTypes.push(file.fileType || 'file');  // ✅ Track type
+                    continue;
+                }
+
+                try {
+                    console.log(`📤 Uploading file ${i + 1}/${selectedFiles.length}:`, file.name);
+                    showNotification('Uploading', `File ${i + 1}/${selectedFiles.length}: ${file.name}`);
+
+                    // ── E2E File Encryption (documents/audio/video, not images) ──────
+                    const _isImg = file.type.startsWith('image/');
+                    let uploadBlob = file;
+                    let _fileEncrypted = false;
+                    if (!_isImg && activeChat && CryptoEngine._ready && CryptoEngine.hasKey(activeChat.id)) {
+                        try {
+                            const buf = await file.arrayBuffer();
+                            const enc = await CryptoEngine.encryptBuffer(activeChat.id, buf);
+                            if (enc) {
+                                uploadBlob = new File([enc], file.name, { type: 'application/octet-stream' });
+                                _fileEncrypted = true;
+                                console.log(`🔒 File encrypted before upload: ${file.name}`);
+                            }
+                        } catch (encErr) {
+                            console.warn('⚠️ File encryption skipped:', encErr);
+                        }
+                    }
+                    // ────────────────────────────────────────────────────────────────
+
+                    const formData = new FormData();
+                    formData.append('file', uploadBlob);
+
+                    const response = await fetch(API_URL + '/upload/file', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${authToken}`
+                        },
+                        body: formData
+                    });
+
+                    if (!response.ok) {
+                        const errorText = await response.text();
+                        throw new Error(`Upload failed: ${response.status} - ${errorText}`);
+                    }
+
+                    const data = await response.json();
+
+                    if (data.success && data.file && data.file.id) {
+                        uploadedFileIds.push(data.file.id);
+                        uploadedFileTypes.push(data.file.type || 'file');  // ✅ Use 'type' from server response
+                        if (_fileEncrypted) window._encryptedFileIds.add(data.file.id);
+                        console.log(`✅ File uploaded: ${file.name} -> ID: ${data.file.id} (${data.file.type})${_fileEncrypted ? ' (encrypted)' : ''}`);
+
+                        // Wait for file system to sync
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    } else {
+                        throw new Error(data.error || 'Invalid upload response');
+                    }
+
+                } catch (error) {
+                    console.error(`❌ Error uploading ${file.name}:`, error);
+                    showError(`Upload failed: ${file.name} - ${error.message}`);
+                    throw error; // Stop entire send if one fails
+                }
+            }
+
+            console.log(`✅ All ${uploadedFileIds.length} files uploaded successfully`);
+            return { ids: uploadedFileIds, types: uploadedFileTypes };  // ✅ Return both IDs and types
+        }
+        // ========== Voice Recording ==========
+
+        let isHoldingRecord = false;
+        let recordHoldTimer = null;
+
+        // Handle voice record button click/hold
+        function handleVoiceRecordClick() {
+            // Do nothing on click - only hold works
+        }
+
+        // Add touch and mouse event listeners for hold-to-record
+        document.addEventListener('DOMContentLoaded', () => {
+            const voiceBtn = document.getElementById('voiceRecordBtn');
+
+            if (voiceBtn) {
+                // Mouse events
+                voiceBtn.addEventListener('mousedown', startRecordHold);
+                voiceBtn.addEventListener('mouseup', stopRecordHold);
+                voiceBtn.addEventListener('mouseleave', stopRecordHold);
+
+                // Touch events
+                voiceBtn.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    startRecordHold();
+                });
+                voiceBtn.addEventListener('touchend', (e) => {
+                    e.preventDefault();
+                    stopRecordHold();
+                });
+                voiceBtn.addEventListener('touchcancel', stopRecordHold);
+            }
+        });
+
+        function startRecordHold() {
+            if (isRecording) return;
+
+            isHoldingRecord = true;
+            const voiceBtn = document.getElementById('voiceRecordBtn');
+
+            // ✅ IMMEDIATE VISUAL FEEDBACK
+            voiceBtn.style.transform = 'scale(0.95)';
+            voiceBtn.style.opacity = '0.8';
+
+            // Start recording after 200ms hold
+            recordHoldTimer = setTimeout(() => {
+                if (isHoldingRecord) {
+                    startVoiceRecording();
+                }
+            }, 200);
+        }
+
+        function stopRecordHold() {
+            isHoldingRecord = false;
+            clearTimeout(recordHoldTimer);
+
+            const voiceBtn = document.getElementById('voiceRecordBtn');
+
+            // ✅ RESET BUTTON STYLE
+            voiceBtn.style.transform = 'scale(1)';
+            voiceBtn.style.opacity = '1';
+
+            if (isRecording) {
+                stopVoiceRecording();
+            }
+        }
+
+        async function startVoiceRecording() {
+            try {
+                console.log('🎤 Starting voice recording...');
+
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+                mediaRecorder = new MediaRecorder(stream, {
+                    mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                        ? 'audio/webm;codecs=opus'
+                        : 'audio/webm'
+                });
+
+                audioChunks = [];
+                recordingStartTime = Date.now();
+
+                mediaRecorder.ondataavailable = (event) => {
+                    audioChunks.push(event.data);
+                };
+
+                mediaRecorder.onstop = async () => {
+                    const duration = Math.floor((Date.now() - recordingStartTime) / 1000);
+
+                    if (duration >= 1) {
+                        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                        await uploadVoiceMessage(audioBlob);
+                    } else {
+                        showNotification('Too Short', 'Hold longer to record');
+                    }
+
+                    stream.getTracks().forEach(track => track.stop());
+                };
+
+                mediaRecorder.start();
+                isRecording = true;
+
+                // ✅ ADD VISUAL FEEDBACK
+                const voiceBtn = document.getElementById('voiceRecordBtn');
+                voiceBtn.classList.add('recording');
+                voiceBtn.innerHTML = '⏺'; // Change to recording icon
+
+                // Show recording indicator
+                const indicator = document.getElementById('voiceRecordingIndicator');
+                indicator.classList.add('active');
+
+                updateRecordingDuration();
+
+                console.log('✅ Recording started');
+
+            } catch (error) {
+                console.error('Voice recording error:', error);
+                showError('Failed to access microphone');
+                isHoldingRecord = false;
+
+                // Reset button state
+                const voiceBtn = document.getElementById('voiceRecordBtn');
+                voiceBtn.classList.remove('recording');
+                voiceBtn.innerHTML = '🎤';
+            }
+        }
+
+        function updateRecordingDuration() {
+            if (!isRecording) return;
+
+            const duration = Math.floor((Date.now() - recordingStartTime) / 1000);
+            const minutes = Math.floor(duration / 60);
+            const seconds = duration % 60;
+
+            document.getElementById('recordingDuration').textContent =
+                `${minutes}:${seconds.toString().padStart(2, '0')}`;
+
+            recordingInterval = setTimeout(updateRecordingDuration, 1000);
+        }
+
+        async function stopVoiceRecording() {
+            if (mediaRecorder && isRecording) {
+                console.log('⏹️ Stopping recording...');
+
+                mediaRecorder.stop();
+                isRecording = false;
+                clearTimeout(recordingInterval);
+
+                // ✅ RESET VISUAL FEEDBACK
+                const voiceBtn = document.getElementById('voiceRecordBtn');
+                voiceBtn.classList.remove('recording');
+                voiceBtn.innerHTML = '🎤'; // Change back to mic icon
+
+                // Hide recording indicator
+                const indicator = document.getElementById('voiceRecordingIndicator');
+                indicator.classList.remove('active');
+
+                console.log('✅ Recording stopped');
+            }
+        }
+
+        function cancelVoiceRecording() {
+            if (mediaRecorder && isRecording) {
+                console.log('❌ Cancelling recording...');
+
+                mediaRecorder.stream.getTracks().forEach(track => track.stop());
+                isRecording = false;
+                clearTimeout(recordingInterval);
+                audioChunks = [];
+
+                // ✅ RESET VISUAL FEEDBACK
+                const voiceBtn = document.getElementById('voiceRecordBtn');
+                voiceBtn.classList.remove('recording');
+                voiceBtn.innerHTML = '🎤';
+
+                const indicator = document.getElementById('voiceRecordingIndicator');
+                indicator.classList.remove('active');
+
+                showNotification('Cancelled', 'Recording cancelled');
+                console.log('✅ Recording cancelled');
+            }
+        }
+
+        async function uploadVoiceMessage(audioBlob) {
+            try {
+                console.log('📤 Uploading voice message...');
+
+                const formData = new FormData();
+                const filename = `voice_${Date.now()}.webm`;
+                formData.append('file', audioBlob, filename);
+
+                const response = await fetch(API_URL + '/upload/voice', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    console.log('✅ Voice uploaded:', data.voice);
+
+                    // Send the voice message via WebSocket - FIXED STRUCTURE
+                    if (ws && ws.readyState === WebSocket.OPEN && activeChat) {
+                        const messageData = {
+                            type: 'message',
+                            chat_id: activeChat.id,
+                            content: '',  // Empty content for voice
+                            encrypted: false,
+                            message_type: 'voice',  // Important: Set type as 'voice'
+                            attachments: [data.voice.id]  // Array with voice file ID
+                        };
+
+                        console.log('📤 Sending voice message via WebSocket:', messageData);
+                        ws.send(JSON.stringify(messageData));
+
+                        showNotification('Success', 'Voice message sent');
+                    } else {
+                        console.error('Cannot send voice - WebSocket not connected or no active chat');
+                        showError('Failed to send voice message');
+                    }
+                } else {
+                    console.error('Voice upload failed:', data.error);
+                    showError('Failed to upload voice message');
+                }
+            } catch (error) {
+                console.error('❌ Voice upload error:', error);
+                showError('Error uploading voice message');
+            }
+        }
+
+        function toggleAudioPlayback(audioId) {
+            console.log('🎵 Toggle audio:', audioId);
+
+            const audio = document.getElementById(audioId);
+            if (!audio) {
+                console.error('❌ Audio element not found:', audioId);
+                alert('Audio element not found!');
+                return;
+            }
+
+            const playBtn = audio.parentElement.querySelector('.voice-play-btn');
+            const progressBar = document.getElementById(`progress_${audioId}`);
+            const durationEl = document.getElementById(`duration_${audioId}`);
+
+            console.log('Audio URL:', audio.querySelector('source')?.src || audio.src);
+
+            if (audio.paused) {
+                // Pause all other audios
+                Object.keys(activeAudios).forEach(id => {
+                    if (id !== audioId && activeAudios[id]) {
+                        activeAudios[id].pause();
+                        const otherBtn = document.querySelector(`#${id}`)?.parentElement?.querySelector('.voice-play-btn');
+                        if (otherBtn) otherBtn.textContent = '▶️';
+                    }
+                });
+
+                // Load and play
+                audio.load();
+
+                audio.play()
+                    .then(() => {
+                        console.log('✅ Playing audio');
+                        playBtn.textContent = '⏸️';
+                        activeAudios[audioId] = audio;
+                    })
+                    .catch(err => {
+                        console.error('❌ Play error:', err);
+                        alert('Cannot play audio: ' + err.message);
+                    });
+
+                // Update progress
+                audio.ontimeupdate = () => {
+                    if (audio.duration && !isNaN(audio.duration)) {
+                        const percent = (audio.currentTime / audio.duration) * 100;
+                        progressBar.style.width = percent + '%';
+
+                        const mins = Math.floor(audio.currentTime / 60);
+                        const secs = Math.floor(audio.currentTime % 60);
+                        durationEl.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+                    }
+                };
+
+                // Handle end
+                audio.onended = () => {
+                    playBtn.textContent = '▶️';
+                    progressBar.style.width = '0%';
+                    delete activeAudios[audioId];
+                };
+
+                // Handle error
+                audio.onerror = () => {
+                    console.error('❌ Audio error:', audio.error);
+                    playBtn.textContent = '❌';
+                    alert('Audio load error!');
+                };
+
+            } else {
+                audio.pause();
+                playBtn.textContent = '▶️';
+                delete activeAudios[audioId];
+            }
+        }
+
+        // Initialize country code dropdown
+        function initializeCountryCodeDropdown() {
+            const select = document.getElementById('countryCode');
+            if (!select) return;
+
+            // Sort by country name
+            const sortedCodes = [...countryCodes].sort((a, b) => a.country.localeCompare(b.country));
+
+            sortedCodes.forEach(item => {
+                const option = document.createElement('option');
+                option.value = item.code;
+                option.textContent = `${item.flag} ${item.code} (${item.country})`;
+                select.appendChild(option);
+            });
+
+            // Set default to India (+91)
+            select.value = '+91';
+
+            // Update display on change
+            select.addEventListener('change', updateFullPhoneNumber);
+            document.getElementById('phone').addEventListener('input', updateFullPhoneNumber);
+        }
+
+        function updateFullPhoneNumber() {
+            const countryCode = document.getElementById('countryCode').value;
+            const phone = document.getElementById('phone').value;
+            const display = document.getElementById('fullPhoneNumber');
+
+            if (countryCode && phone) {
+                display.textContent = `Full number: ${countryCode} ${phone}`;
+                display.style.color = '#DAA520';
+            } else {
+                display.textContent = '';
+            }
+        }
+
+        // ========== WebRTC Calling ==========
+
+        async function initiateCall(callType) {
+            if (!activeChat) {
+                alert('Please select a chat first');
+                return;
+            }
+
+            console.log('📞 === CALL INITIATION (WITH BLOCKING CHECK) ===');
+
+            // Get recipient
+            if (!activeChat.other_user_id && activeChat.type === 'direct') {
+                const members = await getActiveChatMembers();
+                activeChat.other_user_id = members.find(m => m !== currentUser.id);
+            }
+
+            if (!activeChat.other_user_id) {
+                console.error('❌ No recipient found');
+                alert('Cannot determine recipient');
+                return;
+            }
+
+            // ✅ CRITICAL FIX: Check backend FIRST before showing UI or capturing media
+            try {
+                console.log('🔍 Checking blocking status with backend...');
+
+                // STEP 1: Create call on backend (which includes blocking check)
+                const response = await fetch(API_URL + '/calls/initiate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({
+                        recipient_id: activeChat.other_user_id,
+                        type: callType
+                    })
+                });
+
+                console.log('📥 Backend response status:', response.status);
+
+                // ✅ CRITICAL: Check if backend rejected due to blocking
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    console.error('❌ Backend rejected call:', errorData);
+
+                    // Show blocking-specific messages
+                    if (response.status === 403) {
+                        alert(errorData.error || 'Cannot call this user due to blocking.');
+                    } else {
+                        alert(errorData.error || `Call failed: ${response.status}`);
+                    }
+
+                    return; // ← STOP HERE, don't proceed with media or UI
+                }
+
+                const data = await response.json();
+
+                if (!data.success) {
+                    throw new Error(data.error || 'Call creation failed');
+                }
+
+                console.log('✅ Backend approved call, call_id:', data.call_id);
+
+                // Update ICE servers if provided
+                if (data.ice_servers && data.ice_servers.length > 0) {
+                    rtcConfig.iceServers = data.ice_servers;
+                    console.log('✅ Using', data.ice_servers.length, 'ICE servers from backend');
+                }
+
+                currentCall = {
+                    id: data.call_id,
+                    type: callType,
+                    status: 'calling',
+                    recipient_id: activeChat.other_user_id,
+                    isInitiator: true
+                };
+
+                // ✅ NOW (and only now) request media
+                console.log('🎤 Requesting media (blocking check passed)...');
+                const constraints = {
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    },
+                    video: callType === 'video' ? {
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    } : false
+                };
+
+                localStream = await navigator.mediaDevices.getUserMedia(constraints);
+                console.log('✅ Got media stream');
+
+                // ✅ Show UI only after everything succeeds
+                showCallOverlay(activeChat.name, 'Calling...', callType);
+
+                if (callType === 'video') {
+                    const localVideo = document.getElementById('localVideo');
+                    localVideo.style.display = 'block';
+                    localVideo.srcObject = localStream;
+                    document.getElementById('videoToggleBtn').style.display = 'block';
+                }
+
+                // Create peer connection
+                console.log('🔗 Creating peer connection...');
+                await createPeerConnectionWithTrickleICE();
+
+                // Add tracks
+                console.log('➕ Adding tracks...');
+                localStream.getTracks().forEach(track => {
+                    peerConnection.addTrack(track, localStream);
+                });
+
+                // Create offer
+                console.log('📝 Creating offer...');
+                const offer = await peerConnection.createOffer({
+                    offerToReceiveAudio: true,
+                    offerToReceiveVideo: callType === 'video'
+                });
+
+                await peerConnection.setLocalDescription(offer);
+                console.log('✅ Set local description');
+
+                // Send offer
+                console.log('📤 Sending offer (trickle ICE enabled)...');
+
+                const sendOfferResponse = await fetch(API_URL + `/calls/${currentCall.id}/signal`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({
+                        signal_type: 'offer',
+                        signal_data: offer
+                    })
+                });
+
+                if (!sendOfferResponse.ok) {
+                    throw new Error(`Failed to send offer: ${sendOfferResponse.status}`);
+                }
+
+                console.log('✅ Offer sent, ICE candidates will follow');
+
+            } catch (error) {
+                console.error('❌ Call initiation failed:', error);
+                alert(`Failed to start call:\n${error.message}`);
+                endCall(); // Clean up any partial state
+            }
+        }
+
+        async function createPeerConnectionWithTrickleICE() {
+            if (peerConnection) {
+                peerConnection.close();
+            }
+
+            // Ensure rtcConfig is ready
+            if (!rtcConfig) {
+                console.log('⏳ Fetching TURN credentials...');
+                const iceServers = await fetchTURNCredentials();
+                rtcConfig = {
+                    iceServers: iceServers,
+                    iceCandidatePoolSize: 10,
+                    bundlePolicy: 'max-bundle',
+                    rtcpMuxPolicy: 'require',
+                    iceTransportPolicy: 'all' // Try all connection types
+                };
+            }
+
+            peerConnection = new RTCPeerConnection(rtcConfig);
+            console.log('✅ Created peer connection');
+
+            // Track ICE candidates
+            let candidateCount = { host: 0, srflx: 0, relay: 0 };
+
+            // ===== CRITICAL: Send ICE candidates as they arrive (Trickle ICE) =====
+            peerConnection.onicecandidate = async (event) => {
+                if (event.candidate) {
+                    const type = event.candidate.type;
+                    candidateCount[type] = (candidateCount[type] || 0) + 1;
+
+                    console.log(`🧊 ICE Candidate #${Object.values(candidateCount).reduce((a, b) => a + b, 0)}:`, {
+                        type: type,
+                        protocol: event.candidate.protocol,
+                        address: event.candidate.address ? event.candidate.address.substring(0, 10) + '...' : 'N/A'
+                    });
+
+                    if (type === 'relay') {
+                        console.log('🎉 RELAY CANDIDATE FOUND! Cross-network should work!');
+                    }
+
+                    // Send immediately via HTTP (Trickle ICE)
+                    if (currentCall) {
+                        try {
+                            await fetch(API_URL + `/calls/${currentCall.id}/signal`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': `Bearer ${authToken}`
+                                },
+                                body: JSON.stringify({
+                                    signal_type: 'ice_candidate',
+                                    signal_data: { candidate: event.candidate }
+                                })
+                            });
+                        } catch (error) {
+                            console.error('❌ Failed to send ICE via HTTP:', error);
+                        }
+
+                        // Also via WebSocket
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({
+                                type: 'ice_candidate',
+                                call_id: currentCall.id,
+                                signal_data: { candidate: event.candidate }
+                            }));
+                        }
+                    }
+                } else {
+                    console.log('🎉 ICE Gathering Complete:', candidateCount);
+
+                    if (candidateCount.relay === 0) {
+                        console.error('⚠️ NO RELAY CANDIDATES! Cross-network may fail!');
+                        showWarning('Warning: No TURN relay found. Calls may not work across different networks.');
+                    }
+                }
+            };
+
+            function showWarning(message) {
+                console.warn('⚠️', message);
+
+                // Show non-blocking warning
+                const warning = document.createElement('div');
+                warning.style.cssText = `
+                    position: fixed;
+                    top: 80px;
+                    right: 20px;
+                    background: rgba(255, 165, 0, 0.2);
+                    border: 1px solid rgba(255, 165, 0, 0.4);
+                    color: #ffaa00;
+                    padding: 15px 20px;
+                    border-radius: 10px;
+                    z-index: 9999;
+                    max-width: 300px;
+                    font-size: 14px;
+                `;
+                warning.textContent = message;
+                document.body.appendChild(warning);
+
+                setTimeout(() => warning.remove(), 8000);
+            }
+
+            // Connection state monitoring
+            peerConnection.oniceconnectionstatechange = () => {
+                console.log('🔗 ICE State:', peerConnection.iceConnectionState);
+
+                const statusEl = document.getElementById('callStatus');
+
+                switch (peerConnection.iceConnectionState) {
+                    case 'checking':
+                        statusEl.textContent = 'Connecting...';
+                        break;
+                    case 'connected':
+                        console.log('✅ CONNECTED!');
+                        statusEl.textContent = 'Connected';
+                        // Show call duration timer
+                        const _durEl = document.getElementById('callDuration');
+                        if (_durEl) _durEl.style.display = 'block';
+                        startCallDuration();
+                        break;
+                    case 'completed':
+                        statusEl.textContent = 'Connected';
+                        break;
+                    case 'failed':
+                        console.error('❌ CONNECTION FAILED! Candidates:', candidateCount);
+                        statusEl.textContent = 'Connection failed';
+                        // Try ICE restart if we're the initiator, else show warning
+                        if (peerConnection && currentCall?.isInitiator) {
+                            console.log('🔄 Attempting ICE restart...');
+                            statusEl.textContent = 'Reconnecting...';
+                            peerConnection.createOffer({ iceRestart: true })
+                                .then(async offer => {
+                                    await peerConnection.setLocalDescription(offer);
+                                    return fetch(API_URL + `/calls/${currentCall.id}/signal`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+                                        body: JSON.stringify({ signal_type: 'offer', signal_data: offer })
+                                    });
+                                })
+                                .then(() => console.log('✅ ICE restart offer sent'))
+                                .catch(e => {
+                                    console.error('❌ ICE restart failed:', e);
+                                    showWarning('Connection failed. Please try calling again.');
+                                    endCall();
+                                });
+                        } else {
+                            showWarning('Connection failed. The other party may be unreachable.');
+                            endCall();
+                        }
+                        break;
+                    case 'disconnected':
+                        statusEl.textContent = 'Reconnecting...';
+                        // End call if still disconnected after 15 seconds
+                        setTimeout(() => {
+                            if (peerConnection && peerConnection.iceConnectionState === 'disconnected') {
+                                showWarning('Connection lost. Call ended.');
+                                endCall();
+                            }
+                        }, 15000);
+                        break;
+                }
+            };
+
+            // Remote track handling
+            peerConnection.ontrack = (event) => {
+                console.log('📹 Received remote track:', event.track.kind);
+
+                if (!remoteStream) {
+                    remoteStream = new MediaStream();
+                    const remoteVideo = document.getElementById('remoteVideo');
+                    remoteVideo.srcObject = remoteStream;
+                    remoteVideo.style.display = 'block';
+                }
+
+                remoteStream.addTrack(event.track);
+
+                const remoteVideo = document.getElementById('remoteVideo');
+                remoteVideo.play().catch(e => console.error('Play error:', e));
+            };
+
+            return peerConnection;
+        }
+
+        async function getActiveChatMembers() {
+            try {
+                const response = await fetch(API_URL + `/chats/${activeChat.id}`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const data = await response.json();
+                if (data.chat && data.chat.members) {
+                    return data.chat.members.map(m => m.id);
+                }
+            } catch (error) {
+                console.error('Error fetching chat members:', error);
+            }
+            return [];
+        }
+
+        function showCallOverlay(name, status, callType) {
+            const overlay = document.getElementById('callOverlay');
+            document.getElementById('callName').textContent = name;
+            document.getElementById('callStatus').textContent = status;
+
+            if (activeChat?.avatar_url) {
+                const _callAvatarUrl = activeChat.avatar_url.startsWith('http') ? activeChat.avatar_url : `${API_URL}${activeChat.avatar_url}`;
+                document.getElementById('callAvatar').innerHTML = `<img src="${_callAvatarUrl}" alt="${name}" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">`;
+            } else {
+                document.getElementById('callAvatar').textContent = name[0].toUpperCase();
+            }
+
+            overlay.classList.add('active');
+        }
+
+        async function answerCall() {
+            if (!currentCall) {
+                alert('No call to answer');
+                return;
+            }
+
+            console.log('📞 === ANSWERING CALL (MOBILE-FIXED) ===');
+
+            try {
+                const _aw = document.getElementById('answerCallWrap');
+                if (_aw) _aw.style.display = 'none';
+                document.getElementById('callStatus').textContent = 'Connecting...';
+
+                // **CRITICAL FIX: More aggressive retry with exponential backoff**
+                if (!currentCall.offer) {
+                    console.log('📥 Fetching offer with AGGRESSIVE retry...');
+
+                    let offerFound = false;
+                    const _maxAttempts = 10;
+                    for (let attempt = 1; attempt <= _maxAttempts; attempt++) {
+                        const delay = Math.min(300 * Math.pow(1.8, attempt - 1), 4000);
+                        console.log(`⏳ Attempt ${attempt}/${_maxAttempts} (waiting ${Math.round(delay)}ms)...`);
+
+                        try {
+                            const response = await fetch(API_URL + `/calls/${currentCall.id}/signals`, {
+                                headers: { 'Authorization': `Bearer ${authToken}` }
+                            });
+
+                            const data = await response.json();
+
+                            if (data.success && data.signals && data.signals.offer) {
+                                currentCall.offer = data.signals.offer;
+                                console.log('✅ Got offer on attempt', attempt);
+                                offerFound = true;
+                                break;
+                            }
+                        } catch (fetchError) {
+                            console.warn(`⚠️ Fetch failed on attempt ${attempt}:`, fetchError.message);
+                        }
+
+                        if (attempt < _maxAttempts) {
+                            await new Promise(r => setTimeout(r, delay));
+                        }
+                    }
+
+                    if (!offerFound) {
+                        throw new Error('Could not get call offer after retrying. The caller may have canceled.');
+                    }
+                }
+
+                // Get media
+                console.log('🎤 Getting media...');
+                const constraints = {
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    },
+                    video: currentCall.type === 'video' ? {
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    } : false
+                };
+
+                localStream = await navigator.mediaDevices.getUserMedia(constraints);
+                console.log('✅ Got media');
+
+                if (currentCall.type === 'video') {
+                    const localVideo = document.getElementById('localVideo');
+                    localVideo.style.display = 'block';
+                    localVideo.srcObject = localStream;
+                    const _vw2 = document.getElementById('videoToggleWrap');
+                    if (_vw2) _vw2.style.display = 'flex';
+                }
+
+                // Create peer connection
+                console.log('🔗 Creating peer connection...');
+                await createPeerConnectionWithTrickleICE();
+
+                // Add tracks
+                localStream.getTracks().forEach(track => {
+                    peerConnection.addTrack(track, localStream);
+                });
+
+                // **CRITICAL: Set remote description FIRST**
+                console.log('📞 Setting remote description...');
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(currentCall.offer));
+                console.log('✅ Remote description set');
+
+                // **THEN process buffered ICE candidates**
+                if (window.iceCandidateBuffer && window.iceCandidateBuffer.length > 0) {
+                    console.log(`🧊 Processing ${window.iceCandidateBuffer.length} buffered candidates`);
+                    for (const candidate of window.iceCandidateBuffer) {
+                        try {
+                            await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                            console.log('✅ Added buffered candidate');
+                        } catch (e) {
+                            console.warn('⚠️ Could not add candidate:', e.message);
+                        }
+                    }
+                    window.iceCandidateBuffer = [];
+                }
+
+                // Create answer
+                console.log('📝 Creating answer...');
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+
+                // **NEW: Wait a bit for ICE gathering to start**
+                await new Promise(r => setTimeout(r, 200));
+
+                // Send answer
+                console.log('📤 Sending answer...');
+                const response = await fetch(API_URL + `/calls/${currentCall.id}/signal`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({
+                        signal_type: 'answer',
+                        signal_data: answer
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Failed to send answer: ${response.status}`);
+                }
+
+                console.log('✅ Answer sent, waiting for connection...');
+
+                // WebSocket backup
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'call_answer',
+                        call_id: currentCall.id,
+                        signal_data: answer
+                    }));
+                }
+
+                currentCall.isInitiator = false;
+
+            } catch (error) {
+                console.error('❌ Answer failed:', error);
+                alert('Failed to answer call:\n' + error.message);
+                endCall();
+            }
+        }
+
+        function rejectCall() {
+            if (!currentCall) return;
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'call_reject',
+                    call_id: currentCall.id
+                }));
+            }
+
+            endCall();
+        }
+
+        function endCall() {
+            console.log('🔚 Ending call...');
+
+            // ✅ Handle group calls first
+            if (isGroupCall) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'group_call_leave',
+                        group_id: currentCall?.groupId,
+                        call_id: currentCall?.id
+                    }));
+                }
+                endGroupCall();
+                return;
+            }
+
+            // Stop duration timer
+            if (callDurationInterval) {
+                clearInterval(callDurationInterval);
+                callDurationInterval = null;
+            }
+
+            // Notify remote peer and server
+            if (currentCall) {
+                // Fast path: WebSocket notification
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'call_end',
+                        call_id: currentCall.id
+                    }));
+                }
+                // Reliable path: HTTP
+                fetch(API_URL + `/calls/${currentCall.id}/end`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                }).catch(() => { });
+            }
+
+            // Close peer connection cleanly (remove handlers first to avoid spurious events)
+            if (peerConnection) {
+                peerConnection.oniceconnectionstatechange = null;
+                peerConnection.onconnectionstatechange = null;
+                peerConnection.ontrack = null;
+                peerConnection.onicecandidate = null;
+                peerConnection.close();
+                peerConnection = null;
+            }
+
+            // Stop all local media tracks
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+
+            // Clear all call state
+            remoteStream = null;
+            currentCall = null;
+            window.iceCandidateBuffer = [];
+            window.pendingCallOffer = null;
+
+            // Reset UI safely
+            const _safeHide = id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; };
+            const overlay = document.getElementById('callOverlay');
+            if (overlay) overlay.classList.remove('active');
+            _safeHide('localVideo');
+            _safeHide('remoteVideo');
+            _safeHide('videoToggleWrap');
+            _safeHide('answerCallWrap');
+            _safeHide('callDuration');
+
+            console.log('✅ Call ended cleanly');
+        }
+        function toggleMute() {
+            if (!localStream) return;
+
+            const audioTrack = localStream.getAudioTracks()[0];
+            if (audioTrack) {
+                audioTrack.enabled = !audioTrack.enabled;
+
+                const muteBtn = document.getElementById('muteBtn');
+                if (audioTrack.enabled) {
+                    muteBtn.textContent = '🎤';
+                    muteBtn.classList.remove('active');
+                } else {
+                    muteBtn.textContent = '🔇';
+                    muteBtn.classList.add('active');
+                }
+
+                // Notify other participants in group call
+                if (isGroupCall && ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'group_call_mute',
+                        muted: !audioTrack.enabled
+                    }));
+                }
+            }
+        }
+
+        function toggleVideo() {
+            if (!localStream) return;
+
+            const videoTrack = localStream.getVideoTracks()[0];
+            if (videoTrack) {
+                videoTrack.enabled = !videoTrack.enabled;
+
+                const videoBtn = document.getElementById('videoToggleBtn');
+                if (videoTrack.enabled) {
+                    videoBtn.textContent = '📹';
+                    videoBtn.classList.remove('active');
+                    if (isGroupCall) {
+                        document.getElementById('groupLocalVideo').style.display = 'block';
+                    } else {
+                        document.getElementById('localVideo').style.display = 'block';
+                    }
+                } else {
+                    videoBtn.textContent = '🚫';
+                    videoBtn.classList.add('active');
+                    if (isGroupCall) {
+                        document.getElementById('groupLocalVideo').style.display = 'none';
+                    } else {
+                        document.getElementById('localVideo').style.display = 'none';
+                    }
+                }
+
+                // Notify other participants in group call
+                if (isGroupCall && ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'group_call_video',
+                        video_enabled: videoTrack.enabled
+                    }));
+                }
+            }
+        }
+
+        function startCallDuration() {
+            let seconds = 0;
+            callDurationInterval = setInterval(() => {
+                seconds++;
+                const minutes = Math.floor(seconds / 60);
+                const secs = seconds % 60;
+                document.getElementById('callDuration').textContent =
+                    `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+            }, 1000);
+        }
+
+        // ========== GROUP CALL FUNCTIONS ==========
+
+        async function initiateGroupCall(callType) {
+            if (!activeChat || activeChat.type !== 'group') {
+                alert('Group calls are only available in group chats');
+                return;
+            }
+
+            console.log('👥 Starting group call:', callType);
+            isGroupCall = true;
+
+            try {
+                // First, initiate the call on the backend
+                const response = await fetch(`${API_URL}/calls/group/initiate`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({
+                        group_id: activeChat.id,
+                        type: callType
+                    })
+                });
+
+                const result = await response.json();
+
+                if (!result.success) {
+                    throw new Error(result.error || 'Failed to initiate group call');
+                }
+
+                console.log('✅ Group call initiated:', result.call_id);
+
+                currentCall = {
+                    id: result.call_id,
+                    type: callType,
+                    status: 'active',
+                    isGroup: true,
+                    groupId: activeChat.id
+                };
+
+                // Set ICE servers
+                rtcConfig = { iceServers: result.ice_servers };
+
+                // Get media
+                const constraints = {
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    },
+                    video: callType === 'video' ? {
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
+                        facingMode: 'user'
+                    } : false
+                };
+
+                localStream = await navigator.mediaDevices.getUserMedia(constraints);
+                console.log('✅ Got local media stream');
+
+                // Show UI
+                showGroupCallOverlay(activeChat.name, callType);
+
+                // Add local video
+                if (callType === 'video') {
+                    const localVideoEl = document.getElementById('groupLocalVideoElement');
+                    if (localVideoEl) {
+                        localVideoEl.srcObject = localStream;
+                        document.getElementById('groupLocalVideo').style.display = 'block';
+                        const _vw3 = document.getElementById('videoToggleWrap');
+                        if (_vw3) _vw3.style.display = 'flex';
+                    }
+                }
+
+                console.log('👥 Group call ready - waiting for participants to join');
+
+            } catch (error) {
+                console.error('❌ Group call failed:', error);
+                alert(`Failed to start group call: ${error.message}`);
+                endGroupCall();
+            }
+        }
+
+        function showGroupCallOverlay(groupName, callType) {
+            document.getElementById('callOverlay').classList.add('active');
+            document.getElementById('callName').textContent = groupName;
+            document.getElementById('callStatus').textContent = 'Starting group call...';
+
+            // Hide regular video elements
+            document.getElementById('remoteVideo').style.display = 'none';
+            document.getElementById('localVideo').style.display = 'none';
+
+            // Show group call grid
+            document.getElementById('groupCallGrid').style.display = 'grid';
+
+            // Hide regular call avatar
+            document.getElementById('callAvatar').style.display = 'none';
+            document.getElementById('callInfo').style.marginBottom = '0';
+
+            document.getElementById('callDuration').style.display = 'block';
+            startCallDuration();
+        }
+
+        async function handleGroupCallAnswer(userId, answer) {
+            const pc = groupCallPeers.get(userId);
+            if (pc) {
+                await pc.setRemoteDescription(new RTCSessionDescription(answer));
+                console.log('✅ Set remote description for:', userId);
+            }
+        }
+
+        async function handleGroupCallIceCandidate(userId, candidate) {
+            const pc = groupCallPeers.get(userId);
+            if (pc && pc.remoteDescription) {
+                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            }
+        }
+
+        function removeGroupCallParticipant(userId) {
+            const participantDiv = document.getElementById(`participant-${userId}`);
+            if (participantDiv) {
+                participantDiv.remove();
+            }
+
+            const pc = groupCallPeers.get(userId);
+            if (pc) {
+                pc.close();
+                groupCallPeers.delete(userId);
+            }
+
+            groupCallStreams.delete(userId);
+        }
+
+        function endGroupCall() {
+            console.log('🔚 Ending group call');
+
+            // Notify backend that we're leaving
+            if (currentCall && currentCall.id) {
+                fetch(`${API_URL}/calls/group/${currentCall.id}/leave`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    }
+                }).catch(error => {
+                    console.error('Failed to notify backend of leaving:', error);
+                });
+
+                // Also notify via WebSocket
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'group_call_leave',
+                        call_id: currentCall.id
+                    }));
+                }
+            }
+
+            // Close all peer connections
+            groupCallPeers.forEach((pc, userId) => {
+                pc.close();
+            });
+            groupCallPeers.clear();
+            groupCallStreams.clear();
+
+            // Stop local stream
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+
+            // Clear UI
+            document.getElementById('groupCallGrid').innerHTML = '';
+            document.getElementById('groupCallGrid').style.display = 'none';
+            document.getElementById('groupLocalVideo').style.display = 'none';
+
+            // Reset state
+            isGroupCall = false;
+            currentCall = null;
+
+            // Hide overlay
+            document.getElementById('callOverlay').classList.remove('active');
+
+            console.log('✅ Group call ended');
+        }
+
+        // endCall is defined above - handles both group and direct calls
+
+        // WebSocket handlers for group calls
+        async function handleGroupCallStart(data) {
+            console.log('👥 Group call started:', data);
+
+            // Show notification if not the initiator
+            if (data.initiator.id !== currentUser.id) {
+                showNotification('Group Call', `${data.initiator.username} started a ${data.call_type} call in ${data.group_name}`);
+
+                // Show join button if in this group chat
+                if (activeChat && activeChat.id === data.group_id) {
+                    showJoinGroupCallPrompt(data);
+                }
+            }
+        }
+
+        function showJoinGroupCallPrompt(callData) {
+            const joinPrompt = document.createElement('div');
+            joinPrompt.id = 'joinGroupCallPrompt';
+            joinPrompt.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                background: rgba(46, 44, 41, 0.95);
+                backdrop-filter: blur(20px);
+                border-radius: 16px;
+                padding: 20px;
+                box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+                border: 1px solid rgba(226, 163, 62, 0.2);
+                z-index: 10000;
+                min-width: 280px;
+                animation: slideInRight 0.3s ease;
+            `;
+
+            joinPrompt.innerHTML = `
+                <div style="color: #EDE9E2; margin-bottom: 12px;">
+                    <div style="font-weight: 600; font-size: 16px; margin-bottom: 4px;">
+                        📞 ${callData.call_type === 'video' ? 'Video' : 'Audio'} Call
+                    </div>
+                    <div style="font-size: 14px; opacity: 0.8;">
+                        ${callData.initiator.username} started a call
+                    </div>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button onclick="joinGroupCall('${callData.call_id}', '${callData.call_type}')" style="flex: 1; padding: 10px; background: linear-gradient(135deg, #BE5B2E, #E2A33E); border: none; border-radius: 10px; color: #171615; font-weight: 600; cursor: pointer;">
+                        Join
+                    </button>
+                    <button onclick="dismissGroupCallPrompt()" style="flex: 1; padding: 10px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); border-radius: 10px; color: #EDE9E2; font-weight: 600; cursor: pointer;">
+                        Dismiss
+                    </button>
+                </div>
+            `;
+
+            // Remove existing prompt if any
+            const existing = document.getElementById('joinGroupCallPrompt');
+            if (existing) existing.remove();
+
+            document.body.appendChild(joinPrompt);
+
+            // Auto-dismiss after 30 seconds
+            setTimeout(() => {
+                if (joinPrompt.parentElement) {
+                    joinPrompt.remove();
+                }
+            }, 30000);
+        }
+
+        function dismissGroupCallPrompt() {
+            const prompt = document.getElementById('joinGroupCallPrompt');
+            if (prompt) prompt.remove();
+        }
+
+        async function joinGroupCall(callId, callType) {
+            console.log('👥 Joining group call:', callId);
+            dismissGroupCallPrompt();
+
+            isGroupCall = true;
+
+            try {
+                // Join the call on backend
+                const response = await fetch(`${API_URL}/calls/group/${callId}/join`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    }
+                });
+
+                const result = await response.json();
+
+                if (!result.success) {
+                    throw new Error(result.error || 'Failed to join group call');
+                }
+
+                console.log('✅ Joined group call, participants:', result.participants);
+
+                currentCall = {
+                    id: callId,
+                    type: callType,
+                    status: 'active',
+                    isGroup: true,
+                    groupId: activeChat.id
+                };
+
+                // Set ICE servers
+                rtcConfig = { iceServers: result.ice_servers };
+
+                // Get media
+                const constraints = {
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    },
+                    video: callType === 'video' ? {
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
+                        facingMode: 'user'
+                    } : false
+                };
+
+                localStream = await navigator.mediaDevices.getUserMedia(constraints);
+                console.log('✅ Got local media stream');
+
+                // Show UI
+                showGroupCallOverlay(activeChat.name, callType);
+
+                // Add local video
+                if (callType === 'video') {
+                    const localVideoEl = document.getElementById('groupLocalVideoElement');
+                    if (localVideoEl) {
+                        localVideoEl.srcObject = localStream;
+                        document.getElementById('groupLocalVideo').style.display = 'block';
+                        const _vw4 = document.getElementById('videoToggleWrap');
+                        if (_vw4) _vw4.style.display = 'flex';
+                    }
+                }
+
+                // Create peer connections for existing participants
+                for (const participant of result.participants) {
+                    await createPeerConnectionForParticipant(participant.id, participant.username);
+                }
+
+                console.log('👥 Successfully joined group call');
+
+            } catch (error) {
+                console.error('❌ Failed to join group call:', error);
+                alert(`Failed to join group call: ${error.message}`);
+                endGroupCall();
+            }
+        }
+
+        async function createPeerConnectionForParticipant(userId, username) {
+            console.log('🔗 Creating peer connection for:', username);
+
+            if (groupCallPeers.has(userId)) {
+                console.log('⚠️ Peer connection already exists for:', userId);
+                return;
+            }
+
+            const pc = new RTCPeerConnection(rtcConfig);
+            groupCallPeers.set(userId, pc);
+
+            // Add local tracks
+            localStream.getTracks().forEach(track => {
+                pc.addTrack(track, localStream);
+            });
+
+            // Handle remote stream
+            pc.ontrack = (event) => {
+                console.log('📥 Received track from:', username);
+                const remoteStream = event.streams[0];
+                groupCallStreams.set(userId, remoteStream);
+
+                // Create/update video element
+                let participantDiv = document.getElementById(`participant-${userId}`);
+                if (!participantDiv) {
+                    participantDiv = document.createElement('div');
+                    participantDiv.id = `participant-${userId}`;
+                    participantDiv.className = 'group-call-participant';
+                    participantDiv.innerHTML = `
+                        <video autoplay playsinline></video>
+                        <div class="group-call-participant-info">
+                            <div class="group-call-participant-name">${username || 'User'}</div>
+                            <div class="group-call-participant-status">
+                                <div class="group-call-participant-mic">🎤</div>
+                                <div class="group-call-participant-video">📹</div>
+                            </div>
+                        </div>
+                    `;
+                    document.getElementById('groupCallGrid').appendChild(participantDiv);
+                }
+
+                const video = participantDiv.querySelector('video');
+                video.srcObject = remoteStream;
+            };
+
+            // Handle ICE candidates
+            pc.onicecandidate = async (event) => {
+                if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'group_call_ice',
+                        call_id: currentCall.id,
+                        target_user: userId,
+                        candidate: event.candidate
+                    }));
+                }
+            };
+
+            // Connection state monitoring
+            pc.oniceconnectionstatechange = () => {
+                console.log(`🔗 ICE state for ${username}:`, pc.iceConnectionState);
+                if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+                    console.warn(`⚠️ Connection to ${username} is ${pc.iceConnectionState}`);
+                }
+            };
+
+            // Create and send offer
+            try {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'group_call_offer',
+                        call_id: currentCall.id,
+                        target_user: userId,
+                        signal_data: offer
+                    }));
+                    console.log('✅ Sent offer to:', username);
+                }
+            } catch (error) {
+                console.error('❌ Failed to create offer for:', username, error);
+            }
+        }
+
+        async function handleGroupCallOffer(data) {
+            console.log('📥 Received group call offer from:', data.from_user);
+
+            if (!isGroupCall || !localStream) {
+                console.warn('⚠️ Not in group call, ignoring offer');
+                return;
+            }
+
+            // Create peer connection for this user if it doesn't exist
+            let pc = groupCallPeers.get(data.from_user);
+
+            if (!pc) {
+                pc = new RTCPeerConnection(rtcConfig);
+                groupCallPeers.set(data.from_user, pc);
+
+                // Add local tracks
+                localStream.getTracks().forEach(track => {
+                    pc.addTrack(track, localStream);
+                });
+
+                // Handle remote stream
+                pc.ontrack = (event) => {
+                    const remoteStream = event.streams[0];
+                    groupCallStreams.set(data.from_user, remoteStream);
+
+                    // Create video element for this participant
+                    let participantDiv = document.getElementById(`participant-${data.from_user}`);
+                    if (!participantDiv) {
+                        participantDiv = document.createElement('div');
+                        participantDiv.id = `participant-${data.from_user}`;
+                        participantDiv.className = 'group-call-participant';
+                        participantDiv.innerHTML = `
+                            <video autoplay playsinline></video>
+                            <div class="group-call-participant-info">
+                                <div class="group-call-participant-name">User</div>
+                                <div class="group-call-participant-status">
+                                    <div class="group-call-participant-mic">🎤</div>
+                                    <div class="group-call-participant-video">📹</div>
+                                </div>
+                            </div>
+                        `;
+                        document.getElementById('groupCallGrid').appendChild(participantDiv);
+                    }
+
+                    const video = participantDiv.querySelector('video');
+                    video.srcObject = remoteStream;
+                };
+
+                // Handle ICE candidates
+                pc.onicecandidate = async (event) => {
+                    if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({
+                            type: 'group_call_ice',
+                            call_id: currentCall.id,
+                            target_user: data.from_user,
+                            candidate: event.candidate
+                        }));
+                    }
+                };
+            }
+
+            try {
+                // Set remote description and create answer
+                await pc.setRemoteDescription(new RTCSessionDescription(data.signal_data));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+
+                // Send answer
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'group_call_answer',
+                        call_id: currentCall.id,
+                        target_user: data.from_user,
+                        signal_data: answer
+                    }));
+                    console.log('✅ Sent answer to:', data.from_user);
+                }
+            } catch (error) {
+                console.error('❌ Failed to handle offer:', error);
+            }
+        }
+
+        async function handleGroupCallAnswer(userId, answer) {
+            console.log('📥 Received group call answer from:', userId);
+
+            const pc = groupCallPeers.get(userId);
+            if (pc && pc.signalingState === 'have-local-offer') {
+                try {
+                    await pc.setRemoteDescription(new RTCSessionDescription(answer.signal_data || answer));
+                    console.log('✅ Set remote description for:', userId);
+                } catch (error) {
+                    console.error('❌ Failed to set remote description:', error);
+                }
+            }
+        }
+
+        async function handleGroupCallIceCandidate(userId, candidate) {
+            const pc = groupCallPeers.get(userId);
+            if (pc && pc.remoteDescription) {
+                try {
+                    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                    console.log('✅ Added ICE candidate from:', userId);
+                } catch (error) {
+                    console.error('❌ Failed to add ICE candidate:', error);
+                }
+            }
+        }
+
+        async function handleGroupCallParticipantJoined(data) {
+            console.log('👥 Participant joined:', data.user.username);
+
+            if (isGroupCall && data.user.id !== currentUser.id) {
+                // Create peer connection for the new participant
+                await createPeerConnectionForParticipant(data.user.id, data.user.username);
+            }
+        }
+
+        function handleIncomingCall(data) {
+            console.log('📞 ===== INCOMING CALL =====');
+            console.log('📞 Call ID:', data.call.id);
+            console.log('📞 Caller:', data.call.caller_name);
+            console.log('📞 Type:', data.call.type);
+
+            // Create call object
+            currentCall = {
+                id: data.call.id,
+                type: data.call.type,
+                status: 'incoming',
+                offer: null,
+                caller_id: data.call.caller_id,
+                recipient_id: currentUser.id
+            };
+
+            // **Check if offer was already received via WebSocket**
+            if (window.pendingCallOffer && window.pendingCallOffer.call_id === data.call.id) {
+                currentCall.offer = window.pendingCallOffer.offer;
+                console.log('✅ Used pending offer from WebSocket');
+                delete window.pendingCallOffer;
+            }
+
+            // Show call UI
+            showCallOverlay(data.call.caller_name || 'Unknown', 'Incoming call...', data.call.type);
+            const _awInc = document.getElementById('answerCallWrap');
+            if (_awInc) _awInc.style.display = 'flex';
+
+            // Play ringtone
+            playRingtone();
+
+            console.log('📞 Call UI ready, waiting for user action...');
+        }
+        async function handleCallSignal(data) {
+            console.log('📞 Signal:', data.type);
+
+            try {
+                if (data.type === 'call_offer') {
+                    console.log('📥 Received offer via WebSocket');
+
+                    if (currentCall && currentCall.id === data.call_id) {
+                        currentCall.offer = data.signal_data;
+                        console.log('✅ Stored offer in currentCall');
+                    } else {
+                        // Store for when call UI appears
+                        window.pendingCallOffer = {
+                            call_id: data.call_id,
+                            offer: data.signal_data
+                        };
+                        console.log('✅ Stored offer in pendingCallOffer');
+                    }
+
+                } else if (data.type === 'call_answer') {
+                    console.log('📥 Received answer via WebSocket');
+
+                    if (!peerConnection) {
+                        console.error('❌ No peer connection for answer');
+                        return;
+                    }
+
+                    if (peerConnection.signalingState === 'have-local-offer') {
+                        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.signal_data));
+                        console.log('✅ Remote description set from answer');
+
+                        // Process buffered candidates
+                        if (window.iceCandidateBuffer && window.iceCandidateBuffer.length > 0) {
+                            console.log(`🧊 Processing ${window.iceCandidateBuffer.length} buffered candidates`);
+                            for (const candidate of window.iceCandidateBuffer) {
+                                try {
+                                    await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                                } catch (e) {
+                                    console.warn('⚠️ Cannot add candidate:', e.message);
+                                }
+                            }
+                            window.iceCandidateBuffer = [];
+                        }
+                    } else {
+                        console.warn('⚠️ Wrong signaling state for answer:', peerConnection.signalingState);
+                    }
+
+                } else if (data.type === 'ice_candidate') {
+                    if (!peerConnection) {
+                        console.warn('⚠️ No peer connection for ICE candidate');
+
+                        // **NEW: Buffer ICE candidates even before peer connection exists**
+                        if (!window.iceCandidateBuffer) {
+                            window.iceCandidateBuffer = [];
+                        }
+
+                        if (data.signal_data?.candidate) {
+                            window.iceCandidateBuffer.push(data.signal_data.candidate);
+                            console.log('⏳ Buffered ICE before peer connection (total:', window.iceCandidateBuffer.length, ')');
+                        }
+                        return;
+                    }
+
+                    if (data.signal_data?.candidate) {
+                        const candidate = data.signal_data.candidate;
+                        console.log('🧊 Remote ICE candidate:', candidate.type || 'unknown');
+
+                        // Check if we can add it now
+                        if (peerConnection.remoteDescription && peerConnection.remoteDescription.type) {
+                            try {
+                                await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                                console.log('✅ Added ICE candidate immediately');
+                            } catch (error) {
+                                console.error('❌ ICE add failed:', error.message);
+                            }
+                        } else {
+                            // Buffer it
+                            if (!window.iceCandidateBuffer) {
+                                window.iceCandidateBuffer = [];
+                            }
+                            window.iceCandidateBuffer.push(candidate);
+                            console.log('⏳ Buffered ICE candidate (total:', window.iceCandidateBuffer.length, ')');
+                        }
+                    }
+                }
+
+            } catch (error) {
+                console.error('❌ Signal handling error:', error);
+            }
+        }
+        function handleCallEnd(data) {
+            if (data.type === 'call_rejected') {
+                showNotification('Call Rejected', 'The call was rejected');
+            } else if (data.type === 'call_ended') {
+                showNotification('Call Ended', 'The call has ended');
+            }
+            endCall();
+        }
+
+        function handleMessageDeleted(data) {
+            const msgEl = document.querySelector(`[data-message-id="${data.message_id}"]`);
+
+            if (msgEl) {
+                if (data.deleted_for_everyone) {
+                    const bubble = msgEl.querySelector('.message-bubble');
+                    if (bubble) {
+                        bubble.innerHTML = `
+                            <div class="message-text" style="font-style: italic; color: #888;">
+                                🚫 This message was deleted
+                            </div>
+                            <div class="message-info">
+                                <span>${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</span>
+                            </div>
+                        `;
+                    }
+                } else {
+                    msgEl.remove();
+                }
+            }
+        }
+
+        function playRingtone() {
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+
+                oscillator.frequency.value = 440;
+                oscillator.type = 'sine';
+                gainNode.gain.value = 0.3;
+
+                oscillator.start();
+                setTimeout(() => oscillator.stop(), 500);
+            } catch (e) {
+                console.error('Ringtone error:', e);
+            }
+        }
+
+        // ========== Call History ==========
+
+        async function loadCallHistory() {
+            try {
+                const response = await fetch(API_URL + '/calls/history', {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                const data = await response.json();
+                const calls = data.calls || [];
+
+                const container = document.getElementById('callHistoryList');
+                container.innerHTML = '';
+
+                if (calls.length === 0) {
+                    container.innerHTML = '<div style="padding: 20px; text-align: center; color: #888;">No call history</div>';
+                } else {
+                    calls.forEach(call => {
+                        const callEl = document.createElement('div');
+                        callEl.className = 'user-item';
+
+                        const icon = call.type === 'video' ? '📹' : '📞';
+                        const statusIcon = call.status === 'completed' ? '✓' : '✗';
+                        const duration = call.duration ? formatDuration(call.duration) : '0:00';
+                        const time = new Date(call.started_at).toLocaleString();
+
+                        callEl.innerHTML = `
+                            <div style="font-size: 32px;">${icon}</div>
+                            <div style="flex: 1;">
+                                <div style="font-weight: 600;">
+                                    ${call.is_outgoing ? '→' : '←'} ${escapeHtml(call.other_user.username)}
+                                </div>
+                                <div style="font-size: 12px; color: #888;">
+                                    ${time} • ${duration} ${statusIcon}
+                                </div>
+                            </div>
+                        `;
+
+                        container.appendChild(callEl);
+                    });
+                }
+
+                document.getElementById('callHistoryModal').classList.add('active');
+            } catch (error) {
+                console.error('Load call history error:', error);
+                alert('Failed to load call history');
+            }
+        }
+
+        function formatDuration(seconds) {
+            const minutes = Math.floor(seconds / 60);
+            const secs = seconds % 60;
+            return `${minutes}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        // ========== Phone Verification ==========
+
+        function openPhoneVerification() {
+            closeModal('userMenuModal');
+            document.getElementById('phoneVerificationModal').classList.add('active');
+        }
+
+        async function sendPhoneVerification() {
+            const phone = document.getElementById('phoneVerificationInput').value.trim();
+
+            if (!phone) {
+                alert('Please enter your phone number');
+                return;
+            }
+
+            try {
+                const response = await fetch(API_URL + '/auth/send-verification-code', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ phone })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    phoneToVerify = phone;
+                    document.getElementById('verificationPhone').textContent = phone;
+                    document.getElementById('phoneVerificationStep1').style.display = 'none';
+                    document.getElementById('phoneVerificationStep2').style.display = 'block';
+                } else {
+                    alert(data.error || 'Failed to send verification code');
+                }
+            } catch (error) {
+                console.error('Send verification error:', error);
+                alert('Failed to send verification code');
+            }
+        }
+
+        async function verifyPhoneCode() {
+            const code = document.getElementById('phoneVerificationCode').value.trim();
+
+            if (!code || code.length !== 6) {
+                alert('Please enter the 6-digit code');
+                return;
+            }
+
+            try {
+                const response = await fetch(API_URL + '/auth/verify-phone', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({
+                        phone: phoneToVerify,
+                        code: code
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    showNotification('Success', 'Phone verified successfully!');
+                    closeModal('phoneVerificationModal');
+                    document.getElementById('phoneVerificationCode').value = '';
+                    document.getElementById('phoneVerificationStep1').style.display = 'block';
+                    document.getElementById('phoneVerificationStep2').style.display = 'none';
+                } else {
+                    alert(data.error || 'Verification failed');
+                }
+            } catch (error) {
+                console.error('Verification error:', error);
+                alert('Verification failed');
+            }
+        }
+
+        // ========== Notifications ==========
+
+        async function requestNotificationPermission() {
+            if (!('Notification' in window)) {
+                console.log('This browser does not support notifications');
+                return;
+            }
+
+            if (Notification.permission === 'granted') {
+                console.log('✅ Notifications enabled');
+            } else if (Notification.permission !== 'denied') {
+                const permission = await Notification.requestPermission();
+                if (permission === 'granted') {
+                    console.log('✅ Notifications enabled');
+                }
+            }
+        }
+
+        function showError(message) {
+            console.error('❌ Error:', message);
+
+            const errorEl = document.getElementById('errorMessage');
+            if (errorEl) {
+                errorEl.textContent = message;
+                errorEl.style.display = 'block';
+                setTimeout(() => errorEl.style.display = 'none', 7000); // Show longer for errors
+            }
+
+            // Also show browser notification if permission granted
+            if (Notification.permission === 'granted') {
+                new Notification('Error', {
+                    body: message,
+                    icon: '/favicon.ico'
+                });
+            }
+        }
+        function showNotification(title, body) {
+            // ALWAYS show toast regardless of notification permission
+            showToast(body || title, 'info');
+            
+            // Also try browser notification if permitted
+            if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+                try {
+                    new Notification(title, {
+                        body: body || title,
+                        icon: '/favicon.ico',
+                        badge: '/favicon.ico'
+                    });
+                } catch(e) {}
+            }
+        }
+        // ========== Utilities ==========
+
+        function toggleSidebar() {
+            const isMobile = window.innerWidth <= 768;
+            const sidebar = document.getElementById('sidebar');
+
+            if (isMobile) {
+                if (sidebar.classList.contains('show')) {
+                    closeSidebarMobile();
+                } else {
+                    openSidebarMobile();
+                }
+            } else {
+                sidebar.classList.toggle('collapsed');
+            }
+        }
+
+        function openSidebarMobile() {
+            const sidebar = document.getElementById('sidebar');
+            let backdrop = document.getElementById('sidebarBackdrop');
+
+            if (!backdrop) {
+                backdrop = document.createElement('div');
+                backdrop.id = 'sidebarBackdrop';
+                backdrop.className = 'sidebar-backdrop';
+                backdrop.onclick = closeSidebarMobile;
+                document.body.appendChild(backdrop);
+            }
+
+            sidebar.classList.add('show');
+            backdrop.classList.add('show');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeSidebarMobile() {
+            const sidebar = document.getElementById('sidebar');
+            const backdrop = document.getElementById('sidebarBackdrop');
+
+            sidebar.classList.remove('show');
+            if (backdrop) {
+                backdrop.classList.remove('show');
+                setTimeout(() => backdrop.remove(), 300);
+            }
+            document.body.style.overflow = '';
+        }
+
+        function showUserMenu() {
+            document.getElementById('userMenuModal').classList.add('active');
+        }
+
+        async function showChatMenu() {
+            if (!activeChat) {
+                showError('No active chat');
+                return;
+            }
+
+            // Set chat info
+            document.getElementById('chatMenuName').textContent = activeChat.name || 'Unknown';
+            document.getElementById('chatMenuType').textContent = activeChat.type === 'group' ? `Group • ${activeChat.member_count || 0} members` : 'Direct Chat';
+
+            // Set avatar
+            const avatarEl = document.getElementById('chatMenuAvatar');
+            if (activeChat.avatar_url) {
+                const avatarUrl = activeChat.avatar_url.startsWith('http')
+                    ? activeChat.avatar_url
+                    : `${API_URL}${activeChat.avatar_url}`;
+                avatarEl.innerHTML = `<img src="${avatarUrl}" alt="${activeChat.name}" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">`;
+            } else {
+                avatarEl.innerHTML = activeChat.name ? activeChat.name[0].toUpperCase() : '?';
+            }
+
+            // Show/hide group-specific options
+            if (activeChat.type === 'group') {
+                document.getElementById('groupInfoSection').style.display = 'block';
+                document.getElementById('memberCount').textContent = `${activeChat.member_count || 0} members`;
+                document.getElementById('blockUserItem').style.display = 'none';
+            } else {
+                document.getElementById('groupInfoSection').style.display = 'none';
+                const blockItem = document.getElementById('blockUserItem');
+                blockItem.style.display = 'flex';
+
+                // ✅ CRITICAL FIX: Check blocking status and update UI dynamically
+                try {
+                    const response = await fetch(`${API_URL}/users/${activeChat.other_user_id}/blocked-status`, {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+
+                    const data = await response.json();
+
+                    if (data.i_blocked_them) {
+                        // User is blocked - show Unblock option
+                        blockItem.innerHTML = `
+                            <div>
+                                <div class="setting-label" style="color: #4CAF50;">✅ Unblock User</div>
+                                <div class="setting-description">Allow this user to message you again</div>
+                            </div>
+                        `;
+                        blockItem.onclick = () => unblockUserFromChat();
+                    } else {
+                        // User is not blocked - show Block option
+                        blockItem.innerHTML = `
+                            <div>
+                                <div class="setting-label" style="color: #F0787C;">🚫 Block User</div>
+                                <div class="setting-description">Block this user from messaging you</div>
+                            </div>
+                        `;
+                        blockItem.onclick = () => blockUserFromChat();
+                    }
+                } catch (error) {
+                    console.error('Failed to check block status:', error);
+                }
+            }
+
+            // Load mute setting
+            const isMuted = localStorage.getItem(`chat_muted_${activeChat.id}`) === 'true';
+            document.getElementById('chatMuteSetting').checked = isMuted;
+
+            // Show modal
+            document.getElementById('chatMenuModal').classList.add('active');
+        }
+
+        // Chat menu functions
+        function muteChat() {
+            if (!activeChat) return;
+
+            const checkbox = document.getElementById('chatMuteSetting');
+            const isMuted = checkbox.checked;
+
+            localStorage.setItem(`chat_muted_${activeChat.id}`, isMuted);
+
+            showNotification(
+                isMuted ? 'Muted' : 'Unmuted',
+                isMuted ? 'Notifications muted for this chat' : 'Notifications enabled for this chat'
+            );
+        }
+
+        async function viewChatMedia() {
+            if (!activeChat) return;
+
+            closeModal('chatMenuModal');
+            document.getElementById('mediaFilesModal').classList.add('active');
+
+            try {
+                // Fetch all messages with attachments
+                const response = await fetch(API_URL + `/chats/${activeChat.id}/messages?limit=500`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                const data = await response.json();
+                const messages = data.messages || [];
+
+                // Extract all attachments
+                window.allMediaFiles = [];
+                messages.forEach(msg => {
+                    if (msg.attachments && msg.attachments.length > 0) {
+                        msg.attachments.forEach(att => {
+                            window.allMediaFiles.push({
+                                ...att,
+                                message_id: msg.id,
+                                sender: msg.sender,
+                                created_at: msg.created_at
+                            });
+                        });
+                    }
+                });
+
+                console.log('📎 Found', window.allMediaFiles.length, 'media files');
+
+                // Render all files
+                filterMediaFiles('all');
+
+            } catch (error) {
+                console.error('Load media error:', error);
+                document.getElementById('mediaGrid').innerHTML = `
+                    <div style="text-align: center; color: #F0787C; padding: 40px;">
+                        <p style="font-size: 40px; margin-bottom: 10px;">❌</p>
+                        <p>Failed to load media</p>
+                    </div>
+                `;
+            }
+        }
+
+        async function blockUserFromChat() {
+            if (!activeChat || activeChat.type !== 'direct') return;
+
+            if (!await confirm('Block this user? They will not be able to message you and you will not be able to message them.')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(API_URL + '/users/block', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ user_id: activeChat.other_user_id })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    showNotification('Success', 'User blocked successfully');
+
+                    // ✅ Update UI immediately - change to Unblock option
+                    const blockItem = document.getElementById('blockUserItem');
+                    blockItem.innerHTML = `
+                        <div>
+                            <div class="setting-label" style="color: #4CAF50;">✅ Unblock User</div>
+                            <div class="setting-description">Allow this user to message you again</div>
+                        </div>
+                    `;
+                    blockItem.onclick = () => unblockUserFromChat();
+
+                    // Disable message input
+                    document.getElementById('messageInput').disabled = true;
+                    document.getElementById('messageInput').placeholder = 'You have blocked this user';
+                    document.getElementById('sendBtn').disabled = true;
+
+                    // Close the modal
+                    closeModal('chatMenuModal');
+
+                } else {
+                    showError(data.error || 'Failed to block user');
+                }
+            } catch (error) {
+                console.error('Block user error:', error);
+                showError('Failed to block user');
+            }
+        }
+
+        async function unblockUserFromChat() {
+            if (!activeChat || activeChat.type !== 'direct') return;
+
+            if (!await confirm('Unblock this user? You will be able to message each other again.')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(API_URL + '/users/unblock', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ user_id: activeChat.other_user_id })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    showNotification('Success', 'User unblocked successfully');
+
+                    // ✅ Update UI immediately - change to Block option
+                    const blockItem = document.getElementById('blockUserItem');
+                    blockItem.innerHTML = `
+                        <div>
+                            <div class="setting-label" style="color: #F0787C;">🚫 Block User</div>
+                            <div class="setting-description">Block this user from messaging you</div>
+                        </div>
+                    `;
+                    blockItem.onclick = () => blockUserFromChat();
+
+                    // Re-enable message input
+                    document.getElementById('messageInput').disabled = false;
+                    document.getElementById('messageInput').placeholder = 'Type a message...';
+                    document.getElementById('sendBtn').disabled = false;
+
+                    // Close the modal
+                    closeModal('chatMenuModal');
+
+                } else {
+                    showError(data.error || 'Failed to unblock user');
+                }
+            } catch (error) {
+                console.error('Unblock user error:', error);
+                showError('Failed to unblock user');
+            }
+        }
+
+        function filterMediaFiles(filter) {
+            // Update active button
+            document.querySelectorAll('.media-filter-btn').forEach(btn => {
+                btn.classList.remove('active');
+                if (btn.dataset.filter === filter) {
+                    btn.classList.add('active');
+                }
+            });
+
+            if (!window.allMediaFiles || window.allMediaFiles.length === 0) {
+                document.getElementById('mediaGrid').innerHTML = `
+                    <div style="text-align: center; color: #888; padding: 40px;">
+                        <p style="font-size: 40px; margin-bottom: 10px;">📎</p>
+                        <p>No media files yet</p>
+                    </div>
+                `;
+                return;
+            }
+
+            // Filter files
+            const filtered = filter === 'all'
+                ? window.allMediaFiles
+                : window.allMediaFiles.filter(f => f.type === filter);
+
+            if (filtered.length === 0) {
+                document.getElementById('mediaGrid').innerHTML = `
+                    <div style="text-align: center; color: #888; padding: 40px;">
+                        <p style="font-size: 40px; margin-bottom: 10px;">📎</p>
+                        <p>No ${filter === 'all' ? '' : filter} files</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const gridContainer = document.createElement('div');
+
+            if (filter === 'document' || filter === 'audio') {
+                // List view for documents and audio
+                gridContainer.className = 'document-list';
+
+                filtered.forEach(file => {
+                    const item = document.createElement('div');
+                    item.className = 'document-item';
+
+                    let icon = '📄';
+                    if (file.type === 'audio') icon = '🎵';
+                    else if (file.filename?.endsWith('.pdf')) icon = '📕';
+                    else if (file.filename?.endsWith('.zip')) icon = '📦';
+
+                    const date = new Date(file.created_at).toLocaleDateString();
+
+                    item.innerHTML = `
+                        <div class="document-icon">${icon}</div>
+                        <div class="document-details">
+                            <div class="document-name">${escapeHtml(file.filename || 'Unknown')}</div>
+                            <div class="document-meta">
+                                ${formatFileSize(file.size)} • ${date} • ${escapeHtml(file.sender?.username || 'Unknown')}
+                            </div>
+                        </div>
+                    `;
+
+                    item.onclick = () => window.open(API_URL + file.url, '_blank');
+                    gridContainer.appendChild(item);
+                });
+
+            } else {
+                // Grid view for images and videos
+                gridContainer.className = 'media-grid-container';
+
+                filtered.forEach(file => {
+                    const item = document.createElement('div');
+                    item.className = 'media-item';
+
+                    if (file.type === 'image') {
+                        item.innerHTML = `
+                            <img src="${API_URL}${file.url}" alt="${file.filename}" loading="lazy">
+                            <div class="media-item-info">${escapeHtml(file.sender?.username || 'Unknown')}</div>
+                        `;
+                    } else if (file.type === 'video') {
+                        item.innerHTML = `
+                            <video src="${API_URL}${file.url}" preload="metadata"></video>
+                            <div class="media-item-info">🎥 Video</div>
+                        `;
+                    } else {
+                        item.innerHTML = `<div class="media-item-icon">📄</div>`;
+                    }
+
+                    item.onclick = () => {
+                        if (file.type === 'image') {
+                            openImageViewer(API_URL + file.url, file.filename);
+                        } else {
+                            window.open(API_URL + file.url, '_blank');
+                        }
+                    };
+
+                    gridContainer.appendChild(item);
+                });
+            }
+
+            document.getElementById('mediaGrid').innerHTML = '';
+            document.getElementById('mediaGrid').appendChild(gridContainer);
+        }
+
+        function openImageViewer(url, filename) {
+            const viewer = document.createElement('div');
+            viewer.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0, 0, 0, 0.95);
+                z-index: 10000;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 20px;
+                cursor: zoom-out;
+            `;
+
+            viewer.innerHTML = `
+                <button onclick="this.parentElement.remove()" style="position: absolute; top: 20px; right: 20px; width: 40px; height: 40px; border-radius: 50%; background: rgba(255,255,255,0.2); border: none; color: #fff; font-size: 24px; cursor: pointer;">✕</button>
+                <img src="${url}" alt="${filename}" style="max-width: 90%; max-height: 90%; border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,0.5);">
+                <div style="position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); padding: 10px 20px; border-radius: 20px; color: #fff; font-size: 14px; max-width: 80%; text-align: center; word-break: break-word;">
+                    ${escapeHtml(filename)}
+                </div>
+            `;
+
+            viewer.onclick = (e) => {
+                if (e.target === viewer) viewer.remove();
+            };
+
+            document.body.appendChild(viewer);
+        }
+
+        function openChatAvatarViewer() {
+            if (!activeChat) return;
+
+            // Get avatar URL
+            let avatarUrl = activeChat.avatar_url;
+            if (!avatarUrl) {
+                // No avatar image, just show the initial letter
+                showNotification('No Photo', 'This user has no profile picture');
+                return;
+            }
+
+            // Construct full URL if relative
+            if (!avatarUrl.startsWith('http')) {
+                avatarUrl = `${window.location.origin}${avatarUrl.startsWith('/api') ? avatarUrl : '/api' + avatarUrl}`;
+            }
+
+            // Open the image viewer with the profile picture
+            openImageViewer(avatarUrl, activeChat.name || 'Profile Picture');
+        }
+
+        async function searchInChat() {
+            if (!activeChat) return;
+
+            closeModal('chatMenuModal');
+            document.getElementById('searchMessagesModal').classList.add('active');
+
+            // Clear previous search
+            document.getElementById('messageSearchInput').value = '';
+            document.getElementById('searchResults').innerHTML = `
+                <div style="text-align: center; color: #888; padding: 40px;">
+                    <p style="font-size: 40px; margin-bottom: 10px;">🔍</p>
+                    <p>Type to search messages</p>
+                </div>
+            `;
+
+            // Focus search input
+            setTimeout(() => document.getElementById('messageSearchInput').focus(), 100);
+        }
+        // 🔍 Searching Messages
+        async function searchMessages(query) {
+            if (!query.trim()) {
+                document.getElementById('search-results').innerHTML = "";
+                return;
+            }
+
+            console.log('🔍 Searching messages for:', query);
+
+            try {
+                const response = await fetch(
+                    `${API_URL}/chats/${activeChat.id}/messages/search?q=${encodeURIComponent(query)}`,
+                    {
+                        method: 'GET',
+                        headers: {
+                            'Authorization': `Bearer ${authToken}`,
+                            'Content-Type': 'application/json'
+                        }
+                    }
+                );
+
+                console.log('📥 Response status:', response.status);
+
+                const data = await response.json();
+                console.log('📥 Response data:', data);
+
+                // ✅ Correct extraction based on your backend
+                const messages = data.messages || [];
+
+                renderSearchResults(messages);
+
+            } catch (error) {
+                console.error('❌ Search error:', error);
+            }
+        }
+
+        function renderSearchResults(messages) {
+            const container = document.getElementById('search-results');
+            container.innerHTML = "";
+
+            if (!messages.length) {
+                container.innerHTML = "<p>No messages found.</p>";
+                return;
+            }
+
+            messages.forEach(msg => {
+                const div = document.createElement("div");
+                div.className = "search-result-item";
+
+                // Shortened preview like WhatsApp
+                const preview = msg.content?.length > 60
+                    ? msg.content.substring(0, 60) + "…"
+                    : (msg.content || "");
+
+                div.innerHTML = `
+                    <div class="result-row">
+                        <div class="result-preview">${preview}</div>
+                        <div class="result-time">${new Date(msg.created_at).toLocaleString()}</div>
+                    </div>
+                `;
+
+                // ⭐ CLICK HANDLER — JUMP TO ACTUAL MESSAGE
+                div.onclick = async () => {
+                    closeModal('searchMessagesModal');
+                    // STEP 1 — Ensure chat messages are loaded
+                    await loadMessages(activeChat.id);
+
+                    // STEP 2 — Wait a tiny moment for DOM to render all messages
+                    setTimeout(() => {
+                        const target = document.getElementById(`msg-${msg.id}`);
+
+                        if (target) {
+                            target.scrollIntoView({ behavior: "smooth", block: "center" });
+                            target.classList.add("highlight-search");
+
+                            setTimeout(() => {
+                                target.classList.remove("highlight-search");
+                            }, 2000);
+                        } else {
+                            console.warn("❌ Could not find message bubble in DOM:", msg.id);
+                        }
+
+                    }, 100); // 100ms DOM paint delay
+                };
+
+
+                container.appendChild(div);
+            });
+        }
+
+
+        function jumpToMessage(messageId) {
+            const msgEl = document.querySelector(`[data-message-id="${messageId}"]`);
+            if (msgEl) {
+                msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+                // Highlight briefly
+                msgEl.style.background = 'rgba(218, 165, 32, 0.2)';
+                setTimeout(() => {
+                    msgEl.style.background = '';
+                }, 2000);
+            } else {
+                showNotification('Message', 'Message not loaded yet');
+            }
+        }
+
+        function closeSearchPanel() {
+            const searchBox = document.getElementById('search-results');
+            const searchInput = document.getElementById('searchInput'); // your search bar ID
+
+            if (searchBox) searchBox.innerHTML = "";
+            if (searchInput) searchInput.value = "";
+
+            // Optional: hide panel if it has CSS class
+            const panel = document.getElementById('searchPanel');
+            if (panel) panel.style.display = "none";
+        }
+
+        function closeModal(id) {
+            document.getElementById(id).classList.remove('active');
+
+            if (id === 'searchMessagesModal') {
+                document.getElementById('messageSearchInput').value = '';
+                document.getElementById('searchResults').innerHTML = `
+                    <div style="text-align:center;color:#888;padding:40px;">
+                        <p style="font-size:40px;">🔍</p>
+                        <p>Type to search messages</p>
+                    </div>
+                `;
+            }
+        }
+
+
+        async function viewGroupMembers() {
+            if (!activeChat || activeChat.type !== 'group') {
+                console.error('❌ Not a group chat or no active chat');
+                showError('This is not a group chat');
+                return;
+            }
+
+            console.log('👥 === VIEW GROUP MEMBERS CALLED ===');
+            console.log('Chat ID:', activeChat.id);
+
+            try {
+                // Close chat menu first
+                closeModal('chatMenuModal');
+
+                // CRITICAL: Wait a moment for chat menu to close
+                await new Promise(resolve => setTimeout(resolve, 200));
+
+                // Get modal element
+                const modal = document.getElementById('groupMembersModal');
+                if (!modal) {
+                    console.error('❌ groupMembersModal not found in DOM');
+                    alert('ERROR: Modal element not found in HTML');
+                    return;
+                }
+
+                console.log('✅ Modal found:', modal);
+
+                // Show modal
+                modal.classList.add('active');
+                console.log('✅ Modal activated');
+
+                // CRITICAL: Wait for modal to fully render
+                await new Promise(resolve => setTimeout(resolve, 300));
+
+                // Get container element
+                const container = document.getElementById('groupMembersList');
+
+                if (!container) {
+                    console.error('❌ groupMembersList container not found!');
+                    console.log('Modal HTML:', modal.innerHTML.substring(0, 500));
+                    alert('ERROR: Container not found inside modal');
+                    return;
+                }
+
+                console.log('✅ Container found:', container);
+                console.log('Container parent:', container.parentElement);
+
+                // Show loading state
+                container.innerHTML = `
+                    <div id="loadingState" style="text-align: center; color: #888; padding: 40px;">
+                        <div class="loading"></div>
+                        <p style="margin-top: 15px;">Loading members from Firestore...</p>
+                    </div>
+                `;
+
+                console.log('✅ Loading state set');
+
+                // Wait for loading state to render
+                await new Promise(resolve => setTimeout(resolve, 100));
+
+                console.log('📡 Fetching chat details...');
+
+                const response = await fetch(`${API_URL}/chats/${activeChat.id}`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                console.log('📥 Response status:', response.status);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                console.log('📦 Full response data:', JSON.stringify(data, null, 2));
+
+                const members = data.chat?.members || [];
+                console.log('👥 Members count:', members.length);
+                console.log('👥 Members data:', members);
+
+                // CRITICAL: Check if container still exists
+                const containerCheck = document.getElementById('groupMembersList');
+                if (!containerCheck) {
+                    console.error('❌ Container disappeared after fetch!');
+                    alert('ERROR: Container was removed from DOM');
+                    return;
+                }
+
+                if (members.length === 0) {
+                    console.warn('⚠️ No members found');
+                    containerCheck.innerHTML = `
+                        <div style="text-align: center; color: #888; padding: 40px;">
+                            <p style="font-size: 40px; margin-bottom: 10px;">👥</p>
+                            <p>No members found</p>
+                            <p style="font-size: 12px; margin-top: 5px; color: #888;">Group ID: ${activeChat.id}</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                console.log('🎨 Starting to render members...');
+
+                // Build HTML string instead of DOM manipulation
+                let membersHTML = '';
+
+                members.forEach((member, index) => {
+                    console.log(`   Building HTML for member ${index + 1}:`, member.username);
+
+                    // Avatar
+                    let avatarContent;
+                    if (member.avatar_url) {
+                        const avatarUrl = member.avatar_url.startsWith('http')
+                            ? member.avatar_url
+                            : `${window.location.origin}${member.avatar_url.startsWith('/api') ? member.avatar_url : '/api' + member.avatar_url}`;
+                        avatarContent = `<img src="${avatarUrl}" alt="${member.username}" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;" onerror="this.parentElement.innerHTML='${(member.username || '?')[0].toUpperCase()}'">`;
+                    } else {
+                        avatarContent = (member.username || '?')[0].toUpperCase();
+                    }
+
+                    const isYou = member.id === currentUser.id;
+                    const isCreator = member.id === activeChat.creator_id;
+                    const isAdmin = member.id === activeChat.creator_id;  // creator = admin
+                    let label = member.username;
+                    if (isYou && isAdmin) {
+                        label += " (You, Admin)";
+                    } else if (isYou) {
+                        label += " (You)";
+                    } else if (isAdmin) {
+                        label += " (Admin)";
+                    }
+
+                    const roleText = isAdmin ? '👑 Admin' : (member.role === 'admin' ? 'Admin' : 'Member');
+
+                    membersHTML += `
+                        <div class="group-member-item" style="display: flex; align-items: center; gap: 15px; padding: 15px; background: rgba(0,0,0,0.4); border: 1px solid rgba(218,165,32,0.2); border-radius: 10px; margin-bottom: 10px; transition: all 0.3s;" onmouseenter="this.style.background='rgba(218,165,32,0.1)'; this.style.borderColor='rgba(218,165,32,0.4)';" onmouseleave="this.style.background='rgba(0,0,0,0.4)'; this.style.borderColor='rgba(218,165,32,0.2)';">
+                            <div class="avatar" style="width: 50px; height: 50px; font-size: 24px; flex-shrink: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 600;">
+                                ${avatarContent}
+                            </div>
+                            <div style="flex: 1; min-width: 0;">
+                                <div style="font-weight: 600; font-size: 16px; margin-bottom: 3px; color: #fff;">
+                                    ${escapeHtml(member.username || 'Unknown')}
+                                    ${isYou ? '<span style="color: #DAA520; font-size: 12px;"> (You)</span>' : ''}
+                                </div>
+                                <div style="font-size: 12px; color: #888;">
+                                    ${member.email || 'No email'} • ${roleText}
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+
+                console.log('✅ HTML built, length:', membersHTML.length);
+
+                // CRITICAL: Final container check before innerHTML
+                const finalContainer = document.getElementById('groupMembersList');
+                if (!finalContainer) {
+                    console.error('❌ Container gone before setting innerHTML!');
+                    alert('CRITICAL ERROR: Container removed from DOM');
+                    return;
+                }
+
+                // Set HTML in one operation
+                finalContainer.innerHTML = membersHTML;
+
+                console.log('✅ innerHTML set');
+                console.log('✅ Container children count:', finalContainer.children.length);
+                console.log('✅ Container HTML length:', finalContainer.innerHTML.length);
+
+                // Force reflow
+                finalContainer.offsetHeight;
+
+                console.log('🎉 === RENDER COMPLETE ===');
+
+            } catch (error) {
+                console.error('❌ Load members error:', error);
+                console.error('Stack trace:', error.stack);
+
+                const container = document.getElementById('groupMembersList');
+                if (container) {
+                    container.innerHTML = `
+                        <div style="text-align: center; color: #F0787C; padding: 40px;">
+                            <p style="font-size: 40px; margin-bottom: 10px;">❌</p>
+                            <p>Failed to load members</p>
+                            <p style="font-size: 12px; margin-top: 5px; color: #888;">${escapeHtml(error.message)}</p>
+                            <button onclick="viewGroupMembers()" style="margin-top: 15px; padding: 8px 16px; background: #DAA520; border: none; border-radius: 8px; color: #000; cursor: pointer; font-weight: 600;">
+                                🔄 Retry
+                            </button>
+                        </div>
+                    `;
+                } else {
+                    alert('CRITICAL: Cannot show error - container not found');
+                }
+            }
+        }
+
+        async function showAddMembersDialog() {
+            try {
+                console.log('👥 Opening add members dialog...');
+
+                // Get current group members from Firestore
+                const currentMembers = await getCurrentGroupMembers();
+                console.log('📋 Current members from Firestore:', currentMembers);
+
+                closeModal('groupMembersModal');
+
+                // Show modal FIRST
+                document.getElementById('groupMembersModal').classList.add('active');
+
+                // Small delay to ensure modal DOM is ready
+                await new Promise(resolve => setTimeout(resolve, 100));
+
+                // NOW get container
+                const container = document.getElementById('groupMembersList');
+                if (!container) {
+                    console.error('❌ Container not found');
+                    showError('Cannot find container');
+                    return;
+                }
+
+                // Create search interface
+                container.innerHTML = `
+                    <div style="margin-bottom: 20px;">
+                        <h3 style="margin-bottom: 15px; color: #DAA520;">Add Members</h3>
+                        <input 
+                            type="text" 
+                            id="memberSearchInput" 
+                            placeholder="🔍 Search users by username or email..." 
+                            oninput="searchUsersForGroup(this.value)"
+                            style="width: 100%; padding: 12px; background: rgba(0,0,0,0.4); border: 1px solid rgba(218,165,32,0.3); border-radius: 10px; color: #fff; font-size: 14px;"
+                        >
+                    </div>
+                    <div id="memberSearchResults" style="max-height: 400px; overflow-y: auto;">
+                        <div style="text-align: center; color: #888; padding: 40px;">
+                            <p style="font-size: 40px; margin-bottom: 10px;">👥</p>
+                            <p>Search for users to add</p>
+                            <p style="font-size: 12px; margin-top: 5px;">Type at least 2 characters</p>
+                        </div>
+                    </div>
+                    <div id="selectedMembersCount" style="margin-top: 15px; padding: 10px; background: rgba(218, 165, 32, 0.1); border-radius: 8px; display: none;">
+                        <span id="groupSelectedCountText" style="color: #DAA520; font-size: 14px;">0 users selected</span>
+                    </div>
+                    <button class="btn-primary" onclick="addSelectedMembersToGroup()" id="addMembersBtn" style="margin-top: 15px; width: 100%; opacity: 0.5;" disabled>
+                        ➕ Add Selected
+                    </button>
+                `;
+
+                // Store current members for filtering
+                window.currentGroupMembers = currentMembers;
+                window.selectedNewMembers = new Set();
+
+                // Focus search input
+                setTimeout(() => {
+                    const searchInput = document.getElementById('memberSearchInput');
+                    if (searchInput) searchInput.focus();
+                }, 100);
+
+                console.log('✅ Add members dialog ready');
+
+            } catch (error) {
+                console.error('❌ Show add members error:', error);
+                showError('Failed to open add members dialog: ' + error.message);
+            }
+        }
+
+        async function searchUsersForGroup(query) {
+            query = query.trim();
+
+            const resultsContainer = document.getElementById('memberSearchResults');
+
+            if (query.length < 2) {
+                resultsContainer.innerHTML = `
+                    <div style="text-align: center; color: #888; padding: 40px;">
+                        <p style="font-size: 40px; margin-bottom: 10px;">👥</p>
+                        <p>Search for users to add</p>
+                        <p style="font-size: 12px; margin-top: 5px;">Type at least 2 characters</p>
+                    </div>
+                `;
+                return;
+            }
+
+            try {
+                console.log('🔍 Searching users in Firestore:', query);
+
+                // Show loading
+                resultsContainer.innerHTML = `
+                    <div style="text-align: center; color: #888; padding: 40px;">
+                        <div class="loading"></div>
+                        <p style="margin-top: 15px;">Searching users in Firestore...</p>
+                    </div>
+                `;
+
+                // Search users in Firestore via backend
+                const response = await fetch(`${API_URL}/users/search-all?q=${encodeURIComponent(query)}`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                const users = data.users || [];
+
+                console.log('✅ Found users in Firestore:', users.length);
+
+                // Filter out current members and current user
+                const availableUsers = users.filter(u =>
+                    !window.currentGroupMembers.includes(u.id) &&
+                    u.id !== currentUser.id
+                );
+
+                console.log('📋 Available to add:', availableUsers.length);
+
+                if (availableUsers.length === 0) {
+                    resultsContainer.innerHTML = `
+                        <div style="text-align: center; color: #888; padding: 40px;">
+                            <p style="font-size: 40px; margin-bottom: 10px;">🔍</p>
+                            <p>No users found</p>
+                            <p style="font-size: 12px; margin-top: 5px;">Try a different search term or all matching users are already members</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                // Render results
+                resultsContainer.innerHTML = '';
+
+                availableUsers.forEach(user => {
+                    const item = document.createElement('div');
+                    item.className = 'forward-chat-item';
+                    item.style.cssText = `
+                        display: flex;
+                        align-items: center;
+                        gap: 12px;
+                        padding: 12px;
+                        background: rgba(0,0,0,0.3);
+                        border: 1px solid rgba(218,165,32,0.2);
+                        border-radius: 8px;
+                        margin-bottom: 8px;
+                        cursor: pointer;
+                        transition: all 0.2s;
+                    `;
+                    item.dataset.userId = user.id;
+                    item.dataset.userName = (user.username || '').toLowerCase();
+
+                    // Avatar - handle both local uploads and Google avatars
+                    let avatarContent;
+                    if (user.avatar_url) {
+                        const avatarUrl = user.avatar_url.startsWith('http')
+                            ? user.avatar_url
+                            : `${window.location.origin}${user.avatar_url.startsWith('/api') ? user.avatar_url : '/api' + user.avatar_url}`;
+                        avatarContent = `<img src="${avatarUrl}" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;" onerror="this.parentElement.innerHTML='${(user.username || '?')[0].toUpperCase()}'">`;
+                    } else {
+                        avatarContent = (user.username || '?')[0].toUpperCase();
+                    }
+
+                    const isSelected = window.selectedNewMembers.has(user.id);
+
+                    item.innerHTML = `
+                        <input 
+                            type="checkbox" 
+                            class="forward-chat-checkbox" 
+                            value="${user.id}"
+                            ${isSelected ? 'checked' : ''}
+                            style="width: 20px; height: 20px; flex-shrink: 0; cursor: pointer;"
+                        >
+                        <div class="forward-chat-avatar" style="width: 45px; height: 45px; font-size: 20px;">
+                            ${avatarContent}
+                        </div>
+                        <div class="forward-chat-info" style="flex: 1; min-width: 0;">
+                            <div class="forward-chat-name" style="font-weight: 600; font-size: 14px; color: #fff;">${escapeHtml(user.username)}</div>
+                            <div class="forward-chat-meta" style="font-size: 12px; color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${user.email ? escapeHtml(user.email) : 'No email'}</div>
+                        </div>
+                        <div class="forward-chat-check-icon" style="color: #DAA520; font-size: 18px; display: ${isSelected ? 'block' : 'none'};">✓</div>
+                    `;
+
+                    // ✅ KEY FIX: Add event listener AFTER creating the element
+                    const checkbox = item.querySelector('.forward-chat-checkbox');
+                    checkbox.addEventListener('change', function (e) {
+                        e.stopPropagation();
+
+                        if (!window.selectedNewMembers) {
+                            window.selectedNewMembers = new Set();
+                        }
+
+                        if (this.checked) {
+                            window.selectedNewMembers.add(user.id);
+                            console.log('✅ Added user:', user.id, 'Total:', window.selectedNewMembers.size);
+                        } else {
+                            window.selectedNewMembers.delete(user.id);
+                            console.log('❌ Removed user:', user.id, 'Total:', window.selectedNewMembers.size);
+                        }
+
+                        updateAddMembersUI();
+                    });
+
+                    // Hover effect
+                    item.addEventListener('mouseenter', function () {
+                        this.style.background = 'rgba(218,165,32,0.1)';
+                        this.style.borderColor = 'rgba(218,165,32,0.4)';
+                    });
+
+                    item.addEventListener('mouseleave', function () {
+                        this.style.background = 'rgba(0,0,0,0.3)';
+                        this.style.borderColor = 'rgba(218,165,32,0.2)';
+                    });
+
+                    if (isSelected) {
+                        item.style.background = 'rgba(218, 165, 32, 0.2)';
+                    }
+
+                    resultsContainer.appendChild(item);
+                });
+
+                console.log('✅ Rendered', availableUsers.length, 'users from Firestore');
+
+            } catch (error) {
+                console.error('❌ Search error:', error);
+                resultsContainer.innerHTML = `
+                    <div style="text-align: center; color: #F0787C; padding: 40px;">
+                        <p style="font-size: 40px; margin-bottom: 10px;">❌</p>
+                        <p>Search failed</p>
+                        <p style="font-size: 12px; margin-top: 5px; color: #888;">${escapeHtml(error.message)}</p>
+                    </div>
+                `;
+            }
+        }
+
+        async function addSelectedMembersToGroup() {
+            if (window.selectedNewMembers.size === 0) {
+                showError('Please select at least one user');
+                return;
+            }
+
+            try {
+                console.log('➕ Adding members:', Array.from(window.selectedNewMembers));
+
+                const addBtn = document.getElementById('addMembersBtn');
+                addBtn.disabled = true;
+                addBtn.innerHTML = '<span class="loading"></span> Adding...';
+
+                let successCount = 0;
+                let failCount = 0;
+
+                for (const memberId of window.selectedNewMembers) {
+                    try {
+                        console.log('➕ Adding member:', memberId);
+
+                        const response = await fetch(`${API_URL}/chats/${activeChat.id}/members`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${authToken}`
+                            },
+                            body: JSON.stringify({ user_id: memberId })
+                        });
+
+                        const data = await response.json();
+
+                        if (response.ok && data.success) {
+                            successCount++;
+                            console.log('✅ Added member:', memberId);
+                        } else {
+                            failCount++;
+                            console.error(`❌ Failed to add member ${memberId}:`, data.error);
+                        }
+                    } catch (error) {
+                        failCount++;
+                        console.error(`❌ Error adding member ${memberId}:`, error);
+                    }
+                }
+
+                console.log(`✅ Added ${successCount} members, ${failCount} failed`);
+
+                if (successCount > 0) {
+                    showNotification('Success', `Added ${successCount} member${successCount > 1 ? 's' : ''} to the group`);
+
+                    // Reload chats to reflect new member count
+                    await loadChats();
+
+                    // Close modal and refresh members view
+                    closeModal('groupMembersModal');
+
+                    // Refresh group members view after short delay
+                    setTimeout(() => viewGroupMembers(), 500);
+                } else {
+                    showError('Failed to add any members');
+                }
+
+                if (failCount > 0) {
+                    console.warn(`⚠️ Failed to add ${failCount} user(s)`);
+                }
+
+                window.selectedNewMembers.clear();
+
+            } catch (error) {
+                console.error('❌ Add members error:', error);
+                showError('Failed to add members: ' + error.message);
+            } finally {
+                const addBtn = document.getElementById('addMembersBtn');
+                if (addBtn) {
+                    addBtn.disabled = false;
+                    addBtn.innerHTML = '➕ Add Selected';
+                }
+            }
+        }
+        function updateAddMembersUI() {
+            const count = window.selectedNewMembers.size;
+            const countDisplay = document.getElementById('selectedMembersCount');
+            const countText = document.getElementById('groupSelectedCountText');
+            const addBtn = document.getElementById('addMembersBtn');
+
+            if (!countDisplay || !countText || !addBtn) return;
+
+            if (count > 0) {
+                countDisplay.style.display = 'block';
+                countText.textContent = `${count} user${count > 1 ? 's' : ''} selected`;
+                addBtn.disabled = false;
+                addBtn.style.opacity = '1';
+            } else {
+                countDisplay.style.display = 'none';
+                addBtn.disabled = true;
+                addBtn.style.opacity = '0.5';
+            }
+        }
+
+
+        async function getCurrentGroupMembers() {
+            try {
+                console.log('📡 Fetching current group members from Firestore...');
+                const response = await fetch(API_URL + `/chats/${activeChat.id}`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                const data = await response.json();
+                const memberIds = data.chat?.members?.map(m => m.id || m) || [];
+                console.log('✅ Current members from Firestore:', memberIds);
+                return memberIds;
+            } catch (error) {
+                console.error('❌ Error fetching current members:', error);
+                return [];
+            }
+        }
+
+        async function editGroupInfo() {
+            if (!activeChat || activeChat.type !== 'group') return;
+
+            closeModal('chatMenuModal');
+
+            try {
+                const response = await fetch(`${API_URL}/chats/${activeChat.id}`, {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`
+                    }
+                });
+
+                const data = await response.json();
+                const chat = data.chat;
+
+                // Populate form
+                document.getElementById('editGroupName').value = chat.name || '';
+                document.getElementById('editGroupDescription').value = chat.description || '';
+
+                const avatarEl = document.getElementById('editGroupAvatar');
+                if (chat.avatar_url) {
+                    const _editGroupAvatarUrl = chat.avatar_url.startsWith('http') ? chat.avatar_url : `${API_URL}${chat.avatar_url}`;
+                    avatarEl.innerHTML = `
+                        <img src="${_editGroupAvatarUrl}" 
+                            style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">
+                    `;
+                } else {
+                    avatarEl.innerHTML = chat.name ? chat.name[0].toUpperCase() : '👥';
+                }
+
+                document.getElementById('editGroupModal').classList.add('active');
+
+            } catch (error) {
+                console.error('Load group error:', error);
+                showError('Failed to load group info');
+            }
+        }
+
+
+        async function saveGroupChanges() {
+            const name = document.getElementById('editGroupName').value.trim();
+            const description = document.getElementById('editGroupDescription').value.trim();
+
+            if (!name || name.length < 3) {
+                showError('Group name must be at least 3 characters');
+                return;
+            }
+
+            try {
+                console.log('💾 Saving group changes:', { name, description, chat_id: activeChat.id });
+
+                const response = await fetch(`${API_URL}/chats/${activeChat.id}/info`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ name, description })
+                });
+
+                const data = await response.json();
+                console.log('📥 Group update response:', data);
+
+                if (response.ok && data.success) {
+                    showNotification('Success', 'Group updated successfully');
+
+                    // ✅ CRITICAL: Update local activeChat state
+                    activeChat.name = name;
+                    activeChat.description = description;
+
+                    // ✅ Update all UI elements showing group name
+                    document.getElementById('activeChatName').textContent = name;
+                    document.getElementById('chatMenuName').textContent = name;
+
+                    // ✅ Update in chats array
+                    const chatIndex = chats.findIndex(c => c.id === activeChat.id);
+                    if (chatIndex !== -1) {
+                        chats[chatIndex].name = name;
+                        chats[chatIndex].description = description;
+                    }
+
+                    // ✅ Refresh chats list to show updated name
+                    renderChats();
+
+                    // Close modal
+                    closeModal('editGroupModal');
+                    closeModal('chatMenuModal');
+
+                    console.log('✅ Group UI updated successfully');
+                } else {
+                    console.error('❌ Group update failed:', data.error);
+                    showError(data.error || 'Failed to update group');
+                }
+            } catch (error) {
+                console.error('❌ Save group error:', error);
+                showError('Failed to save changes: ' + error.message);
+            }
+        }
+
+        // Handle group avatar upload
+        document.addEventListener('DOMContentLoaded', () => {
+            const groupAvatarUpload = document.getElementById('groupAvatarUpload');
+
+            if (groupAvatarUpload) {
+                groupAvatarUpload.addEventListener('change', async (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+
+                    if (file.size > 5 * 1024 * 1024) {
+                        showError('Image must be less than 5MB');
+                        return;
+                    }
+
+                    if (!file.type.startsWith('image/')) {
+                        showError('Please select an image file');
+                        return;
+                    }
+
+                    try {
+                        console.log('📤 Uploading group avatar...');
+
+                        // Upload to file endpoint
+                        const formData = new FormData();
+                        formData.append('file', file);
+
+                        const uploadResponse = await fetch(API_URL + '/upload/file', {
+                            method: 'POST',
+                            headers: { 'Authorization': `Bearer ${authToken}` },
+                            body: formData
+                        });
+
+                        const uploadData = await uploadResponse.json();
+
+                        if (!uploadResponse.ok || !uploadData.success) {
+                            throw new Error(uploadData.error || 'Upload failed');
+                        }
+
+                        console.log('✅ Avatar uploaded:', uploadData.file.url);
+
+                        // Show preview
+                        document.getElementById('editGroupAvatar').innerHTML = `
+                            <img src="${API_URL}${uploadData.file.url}" 
+                                style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">
+                        `;
+
+                        // Update group with new avatar URL
+                        const updateResponse = await fetch(`${API_URL}/chats/${activeChat.id}/info`, {
+                            method: 'PUT',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${authToken}`
+                            },
+                            body: JSON.stringify({ avatar_url: uploadData.file.url })
+                        });
+
+                        const updateData = await updateResponse.json();
+
+                        if (updateResponse.ok && updateData.success) {
+                            // Update local state
+                            activeChat.avatar_url = uploadData.file.url;
+
+                            // Update UI
+                            const avatarUrl = uploadData.file.url.startsWith('http')
+                                ? uploadData.file.url
+                                : `${window.location.origin}${uploadData.file.url.startsWith('/api') ? uploadData.file.url : '/api' + uploadData.file.url}`; document.getElementById('activeChatAvatar').innerHTML = `<img src="${avatarUrl}" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">`;
+                            document.getElementById('chatMenuAvatar').innerHTML = `<img src="${avatarUrl}" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">`;
+
+                            // Update in chats array
+                            const chatIndex = chats.findIndex(c => c.id === activeChat.id);
+                            if (chatIndex !== -1) {
+                                chats[chatIndex].avatar_url = uploadData.file.url;
+                            }
+
+                            renderChats();
+
+                            showNotification('Success', 'Group avatar updated!');
+                            console.log('✅ Group avatar updated in all places');
+                        } else {
+                            throw new Error(updateData.error || 'Failed to update avatar');
+                        }
+
+                    } catch (error) {
+                        console.error('❌ Group avatar error:', error);
+                        showError('Failed to update avatar: ' + error.message);
+                    }
+                });
+            }
+        });
+
+        async function clearChatHistory() {
+            if (!activeChat) return;
+
+            if (!await confirm('Are you sure you want to clear all messages in this chat? This cannot be undone.')) {
+                return;
+            }
+
+            try {
+                // Clear messages from UI
+                document.getElementById('messagesContainer').innerHTML = `
+                    <div style="text-align: center; color: #888; padding: 40px;">
+                        <p style="font-size: 40px; margin-bottom: 10px;">💬</p>
+                        <p>Chat history cleared</p>
+                        <p style="font-size: 12px; margin-top: 5px;">Start a new conversation!</p>
+                    </div>
+                `;
+
+                showNotification('Success', 'Chat history cleared');
+                closeModal('chatMenuModal');
+
+            } catch (error) {
+                console.error('Clear history error:', error);
+                showError('Failed to clear history');
+            }
+        }
+
+        async function blockUser() {
+            if (!activeChat || activeChat.type !== 'direct') return;
+
+            if (!confirm('Block this user? They will not be able to message you.')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(API_URL + '/users/block', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ user_id: activeChat.other_user_id })
+                });
+
+                if (response.ok) {
+                    showNotification('Success', 'User blocked');
+                    closeModal('chatMenuModal');
+
+                    // Close chat and reload
+                    activeChat = null;
+                    document.getElementById('emptyState').style.display = 'flex';
+                    document.getElementById('activeChat').style.display = 'none';
+                    await loadChats();
+                } else {
+                    const error = await response.json();
+                    showError(error.error || 'Failed to block user');
+                }
+            } catch (error) {
+                console.error('Block user error:', error);
+                showError('Failed to block user');
+            }
+        }
+        async function leaveChat() {
+            if (!activeChat) return;
+
+            const confirmMsg = activeChat.type === 'group'
+                ? 'Leave this group? You will no longer receive messages.'
+                : 'Delete this chat? All messages will be removed.';
+
+            if (!await confirm(confirmMsg)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(API_URL + `/chats/${activeChat.id}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                if (response.ok) {
+                    showNotification('Success', activeChat.type === 'group' ? 'Left group' : 'Chat deleted');
+
+                    // Remove from UI
+                    activeChat = null;
+                    document.getElementById('emptyState').style.display = 'flex';
+                    document.getElementById('activeChat').style.display = 'none';
+
+                    // Reload chats
+                    await loadChats();
+
+                    closeModal('chatMenuModal');
+                } else {
+                    const error = await response.json();
+                    showError(error.error || 'Failed to leave chat');
+                }
+
+            } catch (error) {
+                console.error('Leave chat error:', error);
+                showError('Failed to leave chat');
+            }
+        }
+
+        function openProfileSettings() {
+            closeModal('userMenuModal');
+            openSettings();
+        }
+
+        function closeModal(modalId) {
+            const modal = document.getElementById(modalId);
+            if (modal) {
+                modal.classList.remove('active');
+
+                // Specific cleanup based on modal
+                switch (modalId) {
+                    case 'forwardMessageModal':
+                        messageToForward = null;
+                        document.querySelectorAll('.forward-chat-checkbox').forEach(cb => cb.checked = false);
+                        break;
+                    case 'editMessageModal':
+                        messageToEdit = null;
+                        document.getElementById('editMessageText').value = '';
+                        break;
+                    case 'phoneVerificationModal':
+                        document.getElementById('phoneVerificationCode').value = '';
+                        document.getElementById('phoneVerificationInput').value = '';
+                        document.getElementById('phoneVerificationStep1').style.display = 'block';
+                        document.getElementById('phoneVerificationStep2').style.display = 'none';
+                        break;
+                    case 'settingsModal':
+                        // No specific cleanup needed for settings
+                        break;
+                }
+            }
+        }
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function formatFileSize(bytes) {
+            if (!bytes) return '0 B';
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        // Load Google API
+        function loadGoogleAPI() {
+            const script = document.createElement('script');
+            script.src = 'https://accounts.google.com/gsi/client';
+            script.async = true;
+            script.defer = true;
+            document.head.appendChild(script);
+        }
+
+        let authFormInitialized = false;
+        function initializeAuthForm() {
+            if (authFormInitialized) {
+                console.log('⏭️ Auth form already initialized, skipping...');
+                return;
+            }
+
+            console.log('🔧 Initializing auth form...');
+
+            const authForm = document.getElementById('authForm');
+            if (!authForm) {
+                console.error('❌ Auth form not found!');
+                return;
+            }
+
+            // ✅ CRITICAL FIX: Remove any existing submit handlers first
+            authForm.onsubmit = null;
+
+            // Attach handler with proper event capturing
+            authForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                e.stopPropagation(); // ← ADD THIS LINE
+                e.stopImmediatePropagation();
+
+                if (document.getElementById('authSubmitBtn').dataset.submitting === 'true') {
+                    console.log('⏹️ Already submitting, ignoring duplicate');
+                    return;
+                }
+
+                // Mark as submitting
+                document.getElementById('authSubmitBtn').dataset.submitting = 'true';
+
+                console.log('🔥 FORM SUBMIT TRIGGERED!');
+
+                const username = document.getElementById('username').value.trim();
+                const password = document.getElementById('password').value;
+
+                console.log('🔐 Form submitted:', { username, mode: isLoginMode ? 'login' : 'register' });
+                console.log('📍 API_URL:', API_URL);
+                console.log('📍 Endpoint:', isLoginMode ? '/auth/login' : '/auth/register');
+
+                if (!username || !password) {
+                    console.log('❌ Validation failed: empty fields');
+                    showError('Please enter username and password');
+                    return;
+                }
+
+                if (!isLoginMode && password.length < 6) {
+                    console.log('❌ Validation failed: password too short');
+                    showError('Password must be at least 6 characters');
+                    return;
+                }
+
+                setAuthLoading(true);
+                hideMessages();
+
+                try {
+                    const endpoint = isLoginMode ? '/auth/login' : '/auth/register';
+                    const payload = { username, password };
+
+                    if (!isLoginMode) {
+                        const emailInput = document.getElementById('email');
+                        const phoneInput = document.getElementById('phone');
+                        const countryCodeInput = document.getElementById('countryCode');
+
+                        if (emailInput && emailInput.value.trim()) {
+                            payload.email = emailInput.value.trim();
+                        }
+
+                        if (phoneInput && phoneInput.value.trim() && countryCodeInput && countryCodeInput.value) {
+                            payload.phone = countryCodeInput.value + phoneInput.value.trim();
+                        }
+                    }
+
+                    console.log('📤 Sending to:', API_URL + endpoint);
+                    console.log('📤 Payload:', payload);
+
+                    const response = await fetch(API_URL + endpoint, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    console.log('📥 Response status:', response.status);
+
+                    const data = await response.json();
+                    console.log('📥 Response data:', data);
+
+                    if (response.ok && data.success) {
+                        authToken = data.token;
+                        currentUser = data.user;
+                        localStorage.setItem('auth_token', authToken);
+                        localStorage.setItem('current_user', JSON.stringify(currentUser));
+
+                        console.log('✅ Auth successful, token stored');
+                        showSuccess(isLoginMode ? 'Login successful!' : 'Registration successful!');
+                        setTimeout(() => showChatInterface(), 500);
+                    } else {
+                        console.error('❌ Auth failed:', data.error);
+                        showError(data.error || 'Authentication failed');
+                    }
+                } catch (error) {
+                    console.error('❌ Auth error:', error);
+                    showError('Connection error: ' + error.message);
+                } finally {
+                    setAuthLoading(false);
+                }
+            }, true); // ← ADD THIS: true = use capture phase
+
+            // Attach toggle handler
+            const toggleLink = document.getElementById('toggleLink');
+            if (toggleLink) {
+                toggleLink.addEventListener('click', toggleAuth);
+                console.log('✅ Toggle handler attached');
+            }
+
+            // ✅ ALSO: Prevent default submit on the button itself
+            const submitBtn = document.getElementById('authSubmitBtn');
+            if (submitBtn) {
+                submitBtn.type = 'submit'; // Ensure it's a submit button
+                console.log('✅ Submit button configured');
+            }
+
+            authFormInitialized = true;
+            console.log('✅ Auth form initialized');
+        }
+        async function handleAuthSubmit() {
+            console.log('🖱️ Button clicked directly');
+
+            const form = document.getElementById('authForm');
+            if (form) {
+                // Trigger form submit event
+                form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+            }
+        }
+        // ✅ BULLETPROOF: Ensure form exists before attaching handlers
+        function waitForElement(selector, callback) {
+            const element = document.querySelector(selector);
+            if (element) {
+                callback(element);
+            } else {
+                setTimeout(() => waitForElement(selector, callback), 100);
+            }
+        }
+        // ===== MAIN DOM INITIALIZATION =====
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('📄 DOM Content Loaded');
+
+            // 1. Initialize auth form
+            waitForElement('#authForm', (form) => {
+                console.log('✅ Auth form found, initializing...');
+                initializeAuthForm();
+            });
+
+            // 2. Initialize emoji picker
+            initializeEmojiPicker();
+
+            // 3. Initialize country codes
+            initializeCountryCodeDropdown();
+
+            // 4. ✅ SINGLE FILE INPUT SETUP (NO DUPLICATES)
+            console.log('📄 Initializing file inputs...');
+
+            const fileInput = document.getElementById('fileInput');
+            const imageInput = document.getElementById('imageInput');
+            const videoInput = document.getElementById('videoInput');
+            const audioInput = document.getElementById('audioInput');
+
+            if (!fileInput || !imageInput) {
+                console.error('❌ File inputs not found in DOM');
+                return;
+            }
+
+            // ✅ Attach handlers ONCE
+            fileInput.addEventListener('change', handleFileSelect, false);
+            imageInput.addEventListener('change', handleFileSelect, false);
+
+            if (videoInput) {
+                videoInput.addEventListener('change', handleFileSelect, false);
+            }
+
+            if (audioInput) {
+                audioInput.addEventListener('change', handleFileSelect, false);
+            }
+
+            console.log('✅ File input handlers attached');
+
+            // Mobile-specific setup
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+            if (isMobile) {
+                console.log('📱 Configuring for mobile device');
+
+                // ✅ Broader file acceptance on mobile
+                fileInput.setAttribute('accept', '*/*');
+                imageInput.setAttribute('accept', 'image/*,video/*');
+
+                // ✅ iOS-specific fixes
+                if (/iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+                    // iOS: Remove capture to allow gallery selection
+                    imageInput.removeAttribute('capture');
+
+                    console.log('🍎 iOS: Optimized for gallery and camera access');
+                } else if (/Android/i.test(navigator.userAgent)) {
+                    // Android: Allow both camera and gallery
+                    imageInput.removeAttribute('capture'); // Let Android choose
+                    console.log('🤖 Android: Optimized for flexible media selection');
+                }
+
+                // ✅ Add better touch feedback
+                document.addEventListener('touchstart', function () { }, { passive: true });
+
+                console.log('✅ Mobile optimizations applied');
+            }
+
+            // 5. Initialize responsive features
+            initResponsive();
+
+            // 6. Auto-close sidebar when clicking chat on mobile
+            if (window.innerWidth <= 768) {
+                document.querySelectorAll('.contact-item').forEach(item => {
+                    item.addEventListener('click', () => {
+                        setTimeout(closeSidebarMobile, 150);
+                    });
+                });
+            }
+
+            // ✅ 7. Add click-outside handler for emoji picker
+            document.addEventListener('click', (e) => {
+                const picker = document.getElementById('emojiPicker');
+                const emojiBtn = document.getElementById('emojiBtn');
+                const messageInput = document.getElementById('messageInput');
+
+                if (picker && !picker.contains(e.target) && e.target !== emojiBtn && !emojiBtn?.contains(e.target)) {
+                    picker.classList.remove('active');
+                }
+            });
+        });
+        // Change openProfileSettings to openSettings
+        function openProfileSettings() {
+            openSettings();
+        }
+
+        // Mobile: Check file access permissions
+        async function checkMobileFileAccess() {
+            if (!/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
+                return true; // Not mobile, skip check
+            }
+
+            try {
+                // Test if file input works
+                const testInput = document.createElement('input');
+                testInput.type = 'file';
+                testInput.accept = 'image/*';
+
+                return new Promise((resolve) => {
+                    testInput.onchange = () => {
+                        console.log('✅ Mobile file access confirmed');
+                        resolve(true);
+                    };
+
+                    // Auto-resolve after 1 second
+                    setTimeout(() => resolve(true), 1000);
+                });
+            } catch (error) {
+                console.error('❌ Mobile file access check failed:', error);
+                return false;
+            }
+        }
+
+        // Close modals when clicking outside - COMPLETE FIX
+        document.addEventListener('DOMContentLoaded', () => {
+            // Get all modals
+            const modals = document.querySelectorAll('.modal');
+
+            modals.forEach(modal => {
+                modal.addEventListener('click', (e) => {
+                    // Only close if clicking directly on the modal backdrop (not the content)
+                    if (e.target === modal) {
+                        modal.classList.remove('active');
+
+                        // Clean up specific modals
+                        if (modal.id === 'forwardMessageModal') {
+                            messageToForward = null;
+                            document.querySelectorAll('.forward-chat-checkbox').forEach(cb => cb.checked = false);
+                        }
+                        if (modal.id === 'editMessageModal') {
+                            messageToEdit = null;
+                            document.getElementById('editMessageText').value = '';
+                        }
+                        if (modal.id === 'phoneVerificationModal') {
+                            document.getElementById('phoneVerificationCode').value = '';
+                            document.getElementById('phoneVerificationInput').value = '';
+                            document.getElementById('phoneVerificationStep1').style.display = 'block';
+                            document.getElementById('phoneVerificationStep2').style.display = 'none';
+                        }
+                    }
+                });
+            });
+
+            // ESC key to close modals
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    document.querySelectorAll('.modal.active').forEach(modal => {
+                        modal.classList.remove('active');
+                    });
+
+                    // Clean up
+                    messageToForward = null;
+                    messageToEdit = null;
+                    currentContextMessage = null;
+                    document.getElementById('messageContextMenu').style.display = 'none';
+                }
+            });
+            // Configure file inputs
+            const fileInput = document.getElementById('fileInput');
+            const imageInput = document.getElementById('imageInput');
+            const audioInput = document.getElementById('audioInput');
+            const videoInput = document.getElementById('videoInput');
+
+            // ✅ Accept attributes are already configured in DOMContentLoaded
+            // No need to reattach listeners or reconfigure here
+            console.log('⚠️ Skipping duplicate file input setup - already done in DOMContentLoaded');
+        });
+
+        async function openSettings() {
+            closeModal('userMenuModal');
+
+            try {
+                const response = await fetch(API_URL + '/users/settings', {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                const data = await response.json();
+
+                document.getElementById('settingsUsername').value = data.user.username || '';
+                document.getElementById('settingsEmail').value = data.user.email || '';
+                document.getElementById('settingsBio').value = data.user.bio || '';
+
+                // Phone display (now a div)
+                const phoneEl = document.getElementById('settingsPhone');
+                if (phoneEl) phoneEl.textContent = data.user.phone || 'Not set';
+
+                const settings = data.settings || {};
+                document.getElementById('notificationsSetting').checked = settings.notifications !== false;
+                document.getElementById('readReceiptsSetting').checked = settings.read_receipts !== false;
+                document.getElementById('typingIndicatorSetting').checked = settings.typing_indicator !== false;
+                document.getElementById('onlineStatusSetting').checked = settings.online_status !== false;
+
+                if (data.user.phone_verified) {
+                    document.getElementById('phoneVerificationStatus').innerHTML = '✅ Verified';
+                    document.getElementById('phoneVerificationStatus').style.color = '#4CAF50';
+                } else {
+                    document.getElementById('phoneVerificationStatus').innerHTML = '❌ Not verified';
+                    document.getElementById('phoneVerificationStatus').style.color = '#E5484D';
+                }
+
+                // Show avatar
+                const avatarPreview = document.getElementById('settingsAvatarPreview');
+                if (data.user.avatar_url) {
+                    const avatarUrl = data.user.avatar_url.startsWith('http')
+                        ? data.user.avatar_url
+                        : `${API_URL}${data.user.avatar_url}`;
+                    avatarPreview.innerHTML = `
+                        <img src="${avatarUrl}" alt="Avatar">
+                        <div class="avatar-hover-overlay">📷<span>Change</span></div>
+                        <div class="avatar-upload-btn">📷</div>
+                    `;
+                }
+
+                // Refresh security tab
+                _refreshSecurityTab();
+
+                document.getElementById('settingsModal').classList.add('active');
+
+            } catch (error) {
+                console.error('Load settings error:', error);
+                showError('Failed to load settings');
+            }
+        }
+
+        async function saveSettings() {
+            console.log('💾 Saving personal settings...');
+
+            try {
+                const username = document.getElementById('settingsUsername').value.trim();
+                const bio = document.getElementById('settingsBio').value.trim();
+
+                console.log('📝 New values:', { username, bio });
+
+                if (!username || username.length < 3) {
+                    showError('Username must be at least 3 characters');
+                    return;
+                }
+
+                // ✅ Update profile
+                const profileResponse = await fetch(API_URL + '/users/me', {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ username, bio })
+                });
+
+                console.log('📥 Profile response status:', profileResponse.status);
+
+                if (!profileResponse.ok) {
+                    const error = await profileResponse.json();
+                    throw new Error(error.error || 'Profile update failed');
+                }
+
+                const profileData = await profileResponse.json();
+                console.log('✅ Profile updated:', profileData);
+
+                // ✅ Update settings
+                const settings = {
+                    notifications: document.getElementById('notificationsSetting').checked,
+                    read_receipts: document.getElementById('readReceiptsSetting').checked,
+                    typing_indicator: document.getElementById('typingIndicatorSetting').checked,
+                    online_status: document.getElementById('onlineStatusSetting').checked
+                };
+
+                console.log('⚙️ Updating settings:', settings);
+
+                const settingsResponse = await fetch(API_URL + '/users/settings', {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ settings })
+                });
+
+                console.log('📥 Settings response status:', settingsResponse.status);
+
+                if (!settingsResponse.ok) {
+                    const error = await settingsResponse.json();
+                    throw new Error(error.error || 'Settings update failed');
+                }
+
+                const settingsData = await settingsResponse.json();
+                console.log('✅ Settings updated:', settingsData);
+
+                // ✅ Update local state
+                currentUser.username = username;
+                currentUser.bio = bio;
+                localStorage.setItem('current_user', JSON.stringify(currentUser));
+
+                // ✅ Update UI
+                document.getElementById('currentUsername').textContent = username;
+                document.getElementById('userRole').textContent = currentUser.role === 'admin' ? '👑 Admin' : 'User';
+
+                showNotification('Success', 'Settings saved successfully!');
+                closeModal('settingsModal');
+
+                console.log('✅ All settings saved and UI updated');
+
+            } catch (error) {
+                console.error('❌ Save settings error:', error);
+                showError('Failed to save: ' + error.message);
+            }
+        }
+
+        /* ─── Settings Tab Switching ──────────────────────── */
+        function switchSettingsTab(tabId, btn) {
+            // Deactivate all tabs
+            document.querySelectorAll('.settings-tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.settings-tab-panel').forEach(p => p.classList.remove('active'));
+            // Activate selected
+            if (btn) btn.classList.add('active');
+            const panel = document.getElementById('settingsTab-' + tabId);
+            if (panel) panel.classList.add('active');
+            // Refresh security tab on open
+            if (tabId === 'security') _refreshSecurityTab();
+        }
+
+        function _refreshSecurityTab() {
+            const card = document.getElementById('e2eStatusCard');
+            const icon = document.getElementById('e2eStatusIcon');
+            const title = document.getElementById('e2eStatusTitle');
+            const desc = document.getElementById('e2eStatusDesc');
+            const msgBadge = document.getElementById('e2eMsgBadge');
+            const keyDisp = document.getElementById('publicKeyDisplay');
+            if (!card) return;
+
+            if (CryptoEngine._ready && CryptoEngine.keyPair) {
+                card.classList.remove('inactive');
+                if (icon) icon.textContent = '🔒';
+                if (title) title.textContent = 'End-to-End Encrypted';
+                if (desc) desc.textContent = 'Your messages are protected with ECDH P-256 + AES-GCM 256-bit encryption.';
+                if (msgBadge) msgBadge.textContent = '✅';
+                // Show abbreviated public key
+                if (keyDisp && CryptoEngine.keyPair.publicKey) {
+                    window.crypto.subtle.exportKey('jwk', CryptoEngine.keyPair.publicKey).then(jwk => {
+                        const x = jwk.x || '';
+                        keyDisp.textContent = 'P-256 · x=' + x.slice(0, 12) + '…' + x.slice(-8);
+                    }).catch(() => { keyDisp.textContent = 'Key loaded'; });
+                }
+            } else {
+                card.classList.add('inactive');
+                if (icon) icon.textContent = '🔓';
+                if (title) title.textContent = 'Encryption Not Active';
+                if (desc) desc.textContent = 'Encryption keys could not be loaded. Try refreshing the page.';
+                if (msgBadge) msgBadge.textContent = '❌';
+                if (keyDisp) keyDisp.textContent = 'No key available';
+            }
+        }
+
+        async function regenerateKeys() {
+            if (!confirm('Regenerate your encryption keys?\n\nThis will break decryption of existing encrypted messages. Only continue if you have lost access to your old keys.')) return;
+            try {
+                localStorage.removeItem('e2e_private_key');
+                localStorage.removeItem('e2e_public_key');
+                CryptoEngine._ready = false;
+                CryptoEngine.keyPair = null;
+                CryptoEngine.chatKeys.clear();
+                const ok = await CryptoEngine.init();
+                if (ok) await CryptoEngine.uploadPublicKey();
+                _refreshSecurityTab();
+                showNotification('Keys regenerated', 'New encryption keys are active.');
+            } catch (err) {
+                showError('Key regeneration failed: ' + err.message);
+            }
+        }
+
+        /* ─── Encrypted File Download ─────────────────────── */
+        async function decryptAndDownload(fileUrl, filename, fileId) {
+            try {
+                showNotification('Decrypting', 'Downloading and decrypting file…');
+                if (!activeChat || !CryptoEngine._ready || !CryptoEngine.hasKey(activeChat.id)) {
+                    showError('Cannot decrypt: no encryption key for this chat.');
+                    return;
+                }
+                const resp = await fetch(fileUrl, { headers: { 'Authorization': `Bearer ${authToken}` } });
+                if (!resp.ok) throw new Error('Download failed: ' + resp.status);
+                const encBuf = await resp.arrayBuffer();
+                const plainBuf = await CryptoEngine.decryptBuffer(activeChat.id, encBuf);
+                if (!plainBuf) { showError('Decryption failed – key mismatch or corrupted file.'); return; }
+                const blob = new Blob([plainBuf]);
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = filename; a.click();
+                setTimeout(() => URL.revokeObjectURL(url), 5000);
+                showNotification('Done', 'File decrypted and saved.');
+            } catch (err) {
+                showError('Decrypt error: ' + err.message);
+            }
+        }
+
+        // Avatar upload handler
+        document.addEventListener('DOMContentLoaded', () => {
+            const avatarUpload = document.getElementById('avatarUpload');
+            if (avatarUpload) {
+                // Remove any existing listeners
+                const newAvatarUpload = avatarUpload.cloneNode(true);
+                avatarUpload.parentNode.replaceChild(newAvatarUpload, avatarUpload);
+
+                newAvatarUpload.addEventListener('change', async (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+
+                    console.log('📤 Uploading avatar:', file.name, file.size);
+
+                    if (file.size > 5 * 1024 * 1024) {
+                        showError('Avatar must be less than 5MB');
+                        return;
+                    }
+
+                    if (!file.type.startsWith('image/')) {
+                        showError('Please select an image file');
+                        return;
+                    }
+
+                    try {
+                        const formData = new FormData();
+                        formData.append('file', file);
+
+                        console.log('📡 Sending to /users/avatar...');
+
+                        const response = await fetch(API_URL + '/users/avatar', {
+                            method: 'POST',
+                            headers: { 'Authorization': `Bearer ${authToken}` },
+                            body: formData
+                        });
+
+                        console.log('📥 Avatar response status:', response.status);
+
+                        const data = await response.json();
+                        console.log('📥 Avatar response data:', data);
+
+                        if (response.ok && data.success) {
+                            const avatarUrl = data.avatar_url.startsWith('http')
+                                ? data.avatar_url
+                                : `${window.location.origin}${data.avatar_url.startsWith('/api') ? data.avatar_url : '/api' + data.avatar_url}`;
+                            // Update settings modal preview
+                            document.getElementById('settingsAvatarPreview').innerHTML = `
+                                <img src="${avatarUrl}" alt="Avatar" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">
+                                <div class="avatar-upload-btn" onclick="document.getElementById('avatarUpload').click()">📷</div>
+                            `;
+
+                            // Update sidebar avatar
+                            document.getElementById('userAvatar').innerHTML = `<img src="${avatarUrl}" alt="Avatar" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">`;
+
+                            // Update local state
+                            currentUser.avatar_url = data.avatar_url;
+                            localStorage.setItem('current_user', JSON.stringify(currentUser));
+
+                            showNotification('Success', 'Avatar updated successfully!');
+                            console.log('✅ Avatar updated everywhere');
+                        } else {
+                            throw new Error(data.error || 'Upload failed');
+                        }
+                    } catch (error) {
+                        console.error('❌ Avatar upload error:', error);
+                        showError('Failed to upload avatar: ' + error.message);
+                    }
+                });
+            }
+        });
+
+        // Message context menu
+        let currentContextMessage = null;
+        let isContextMenuOpen = false;
+
+        function showMessageContextMenu(event, messageId) {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const menu = document.getElementById('messageContextMenu');
+            const backdrop = document.getElementById('contextMenuBackdrop');
+            currentContextMessage = messageId;
+
+            const msgEl = document.querySelector(`[data-message-id="${messageId}"]`);
+            if (!msgEl) return;
+
+            const isSent = msgEl.classList.contains('sent');
+            const hasText = msgEl.querySelector('.message-text');
+
+            // Show/hide edit option (only for own messages with text)
+            const editMenuItem = document.getElementById('editMenuItem');
+            if (editMenuItem) {
+                editMenuItem.style.display = (isSent && hasText) ? 'flex' : 'none';
+            }
+
+            // Show/hide delete for all (only for own messages)
+            const deleteForAllMenuItem = document.getElementById('deleteForAllMenuItem');
+            if (deleteForAllMenuItem) {
+                deleteForAllMenuItem.style.display = isSent ? 'flex' : 'none';
+            }
+
+            const isMobile = window.innerWidth <= 768;
+
+            if (isMobile) {
+                // Mobile slide-up
+                menu.style.position = 'fixed';
+                menu.style.left = '0';
+                menu.style.right = '0';
+                menu.style.bottom = '0';
+                menu.style.top = 'auto';
+                menu.querySelector('.context-menu-handle').style.display = 'block';
+                backdrop.classList.add('active');
+                document.body.classList.add('context-menu-open');
+            } else {
+                // DESKTOP — FIXED LOGIC
+                menu.style.position = 'fixed';
+                menu.style.display = 'block'; // needed to measure
+
+                // Calculate menu size
+                const menuRect = menu.getBoundingClientRect();
+                const menuWidth = menuRect.width || 240;
+                const menuHeight = menuRect.height || 300;
+
+                const vw = window.innerWidth;
+                const vh = window.innerHeight;
+
+                let left = event.clientX;
+                let top = event.clientY;
+
+                // Clamp X
+                if (left + menuWidth > vw) {
+                    left = vw - menuWidth - 10;
+                }
+                if (left < 10) left = 10;
+
+                // Clamp Y
+                if (top + menuHeight > vh) {
+                    top = vh - menuHeight - 10;
+                }
+                if (top < 10) top = 10;
+
+                menu.style.left = left + 'px';
+                menu.style.top = top + 'px';
+                menu.querySelector('.context-menu-handle').style.display = 'none';
+            }
+
+            menu.style.display = 'block';
+            isContextMenuOpen = true;
+
+            // Re-trigger CSS animation
+            menu.style.animation = 'none';
+            setTimeout(() => {
+                menu.style.animation = '';
+            }, 10);
+        }
+
+        // Function to close context menu
+        function closeContextMenu() {
+            const menu = document.getElementById('messageContextMenu');
+            const backdrop = document.getElementById('contextMenuBackdrop');
+
+            if (!menu || !isContextMenuOpen) return;
+
+            const isMobile = window.innerWidth <= 768;
+
+            if (isMobile) {
+                // Mobile: Slide down animation
+                menu.style.animation = 'menuSlideDown 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards';
+                backdrop.style.animation = 'fadeOut 0.2s forwards';
+
+                setTimeout(() => {
+                    menu.style.display = 'none';
+                    menu.style.animation = '';
+                    backdrop.classList.remove('active');
+                    backdrop.style.animation = '';
+                    document.body.classList.remove('context-menu-open');
+                }, 300);
+            } else {
+                // Desktop: Fade out
+                menu.style.opacity = '0';
+                menu.style.transform = 'scale(0.95)';
+
+                setTimeout(() => {
+                    menu.style.display = 'none';
+                    menu.style.opacity = '1';
+                    menu.style.transform = 'scale(1)';
+                }, 150);
+            }
+
+            isContextMenuOpen = false;
+            currentContextMessage = null;
+        }
+
+        // Add mobile slide down animation
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes menuSlideDown {
+                to { transform: translateY(100%); }
+            }
+            @keyframes fadeOut {
+                to { opacity: 0; }
+            }
+        `;
+        document.head.appendChild(style);
+
+        // Update all menu action functions to close menu after action
+        function copyMessage() {
+            if (!currentContextMessage) return;
+
+            const msgEl = document.querySelector(`[data-message-id="${currentContextMessage}"]`);
+            if (msgEl) {
+                const textEl = msgEl.querySelector('.message-text');
+                if (textEl) {
+                    navigator.clipboard.writeText(textEl.textContent)
+                        .then(() => showNotification('Copied', 'Message copied to clipboard'))
+                        .catch(() => showError('Copy failed'));
+                }
+            }
+
+            closeContextMenu();
+        }
+
+        async function deleteMessageForAll() {
+            if (!currentContextMessage) {
+                showError('No message selected');
+                return;
+            }
+
+            const messageId = currentContextMessage;
+
+            // Close context menu FIRST
+            closeContextMenu();
+
+            if (!confirm('Delete this message for everyone? This cannot be undone.')) {
+                return;
+            }
+
+            try {
+                console.log('🗑️ Deleting message for everyone:', messageId);
+
+                const response = await fetch(`${API_URL}/messages/${messageId}/for-all`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    console.log('✅ Message deleted for everyone');
+
+                    // Update the message in UI
+                    const msgEl = document.querySelector(`[data-message-id="${messageId}"]`);
+                    if (msgEl) {
+                        const bubble = msgEl.querySelector('.message-bubble');
+                        if (bubble) {
+                            bubble.innerHTML = `
+                                <div class="message-text" style="font-style: italic; color: #888;">
+                                    🚫 This message was deleted
+                                </div>
+                                <div class="message-info">
+                                    <span>${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</span>
+                                </div>
+                            `;
+                        }
+                    }
+
+                    showNotification('Success', 'Message deleted for everyone');
+                } else {
+                    throw new Error(data.error || 'Failed to delete message');
+                }
+            } catch (error) {
+                console.error('❌ Delete error:', error);
+                showError('Failed to delete: ' + error.message);
+            }
+        }
+
+        async function deleteMessageForMe() {
+            if (!currentContextMessage) {
+                showError('No message selected');
+                return;
+            }
+
+            const messageId = currentContextMessage;
+
+            // Close context menu FIRST
+            closeContextMenu();
+
+            if (!await confirm('Delete this message for you? Others will still see it.')) {
+                return;
+            }
+
+            try {
+                console.log('🗑️ Deleting message for me:', messageId);
+
+                const response = await fetch(`${API_URL}/messages/${messageId}/for-me`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    console.log('✅ Message deleted for me');
+
+                    // Remove message from UI with animation
+                    const msgEl = document.querySelector(`[data-message-id="${messageId}"]`);
+                    if (msgEl) {
+                        msgEl.style.transition = 'all 0.3s ease-out';
+                        msgEl.style.opacity = '0';
+                        msgEl.style.transform = 'scale(0.95)';
+
+                        setTimeout(() => {
+                            msgEl.remove();
+                        }, 300);
+                    }
+
+                    showNotification('Success', 'Message deleted');
+                } else {
+                    throw new Error(data.error || 'Failed to delete message');
+                }
+            } catch (error) {
+                console.error('❌ Delete error:', error);
+                showError('Failed to delete: ' + error.message);
+            }
+        }
+
+        // Close context menu when clicking outside or on backdrop
+        document.addEventListener('click', (e) => {
+            const menu = document.getElementById('messageContextMenu');
+            const backdrop = document.getElementById('contextMenuBackdrop');
+
+            // Close if clicking outside menu or on backdrop
+            if (isContextMenuOpen &&
+                !menu.contains(e.target) &&
+                !e.target.closest('.message')) {
+                closeContextMenu();
+            }
+        });
+
+        // Close on backdrop click (mobile)
+        document.getElementById('contextMenuBackdrop').addEventListener('click', () => {
+            closeContextMenu();
+        });
+
+        // Close on escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && isContextMenuOpen) {
+                closeContextMenu();
+            }
+        });
+
+        // Prevent context menu from closing when clicking inside it
+        document.getElementById('messageContextMenu').addEventListener('click', (e) => {
+            // Only prevent if not clicking on a menu item
+            if (!e.target.closest('.context-menu-item')) {
+                e.stopPropagation();
+            }
+        });
+
+        // Handle window resize
+        let resizeTimer;
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(() => {
+                if (isContextMenuOpen) {
+                    closeContextMenu();
+                }
+            }, 250);
+        });
+
+        let messageToForward = null;
+        let selectedForwardChats = new Set();
+        function openForwardMessage() {
+            if (!currentContextMessage) {
+                showError('No message selected');
+                closeContextMenu();
+                return;
+            }
+
+            console.log('📤 Opening forward modal for message:', currentContextMessage);
+
+            messageToForward = currentContextMessage;
+            selectedForwardChats.clear();
+
+            // Load chats into forward list
+            loadForwardChats();
+
+            // Reset UI
+            document.getElementById('forwardSearchInput').value = '';
+            document.getElementById('forwardSelectedCount').style.display = 'none';
+            document.getElementById('forwardButton').disabled = true;
+            document.getElementById('forwardButton').style.opacity = '0.5';
+
+            // Close context menu and show forward modal
+            document.getElementById('messageContextMenu').style.display = 'none';
+            document.getElementById('forwardMessageModal').classList.add('active');
+        }
+
+        // Load chats into forward modal
+        function loadForwardChats() {
+            const container = document.getElementById('forwardChatsList');
+            container.innerHTML = '';
+
+            if (chats.length === 0) {
+                container.innerHTML = `
+                    <div style="padding: 40px 20px; text-align: center; color: #888;">
+                        <p style="font-size: 40px; margin-bottom: 10px;">💬</p>
+                        <p>No chats available</p>
+                        <p style="font-size: 12px; margin-top: 5px;">Create a chat first</p>
+                    </div>
+                `;
+                return;
+            }
+
+            chats.forEach(chat => {
+                // Skip current chat (can't forward to same chat)
+                if (activeChat && chat.id === activeChat.id) {
+                    return;
+                }
+
+                const chatEl = document.createElement('div');
+                chatEl.className = 'forward-chat-item';
+                chatEl.dataset.chatId = chat.id;
+                chatEl.dataset.chatName = (chat.name || '').toLowerCase();
+
+                // Handle avatar
+                let avatarContent;
+                if (chat.avatar_url) {
+                    const avatarUrl = chat.avatar_url.startsWith('http')
+                        ? chat.avatar_url
+                        : `${API_URL}${chat.avatar_url}`;
+                    avatarContent = `<img src="${avatarUrl}" alt="${chat.name}" onerror="this.parentElement.innerHTML='${(chat.name || '?')[0].toUpperCase()}'">`;
+                } else {
+                    avatarContent = chat.name ? chat.name[0].toUpperCase() : '?';
+                }
+
+                // Meta info
+                let metaInfo = '';
+                if (chat.type === 'group') {
+                    metaInfo = `<span>👥 Group</span><span>•</span><span>${chat.member_count || 0} members</span>`;
+                } else {
+                    metaInfo = `<span>${chat.status === 'online' ? '🟢 Online' : '⚫ Offline'}</span>`;
+                }
+
+                chatEl.innerHTML = `
+                    <input 
+                        type="checkbox" 
+                        class="forward-chat-checkbox" 
+                        value="${chat.id}"
+                        onchange="toggleForwardChat('${chat.id}')"
+                    >
+                    <div class="forward-chat-avatar">
+                        ${avatarContent}
+                    </div>
+                    <div class="forward-chat-info">
+                        <div class="forward-chat-name">${escapeHtml(chat.name || 'Unknown')}</div>
+                        <div class="forward-chat-meta">${metaInfo}</div>
+                    </div>
+                    <div class="forward-chat-check-icon">✓</div>
+                `;
+
+                // Click anywhere on item to toggle
+                chatEl.addEventListener('click', (e) => {
+                    // Don't trigger if clicking checkbox directly
+                    if (e.target.classList.contains('forward-chat-checkbox')) {
+                        return;
+                    }
+
+                    const checkbox = chatEl.querySelector('.forward-chat-checkbox');
+                    checkbox.checked = !checkbox.checked;
+                    toggleForwardChat(chat.id);
+                });
+
+                container.appendChild(chatEl);
+            });
+
+            console.log('✅ Loaded', chats.length, 'chats for forwarding');
+        }
+
+        // Toggle chat selection for forwarding
+        function toggleForwardChat(chatId) {
+            const chatEl = document.querySelector(`.forward-chat-item[data-chat-id="${chatId}"]`);
+            const checkbox = chatEl?.querySelector('.forward-chat-checkbox');
+
+            if (!chatEl || !checkbox) return;
+
+            if (checkbox.checked) {
+                selectedForwardChats.add(chatId);
+                chatEl.classList.add('selected');
+            } else {
+                selectedForwardChats.delete(chatId);
+                chatEl.classList.remove('selected');
+            }
+
+            updateForwardUI();
+        }
+
+        // Update forward UI based on selections
+        function updateForwardUI() {
+            const count = selectedForwardChats.size;
+            const countDisplay = document.getElementById('forwardSelectedCount');
+            const countText = document.getElementById('selectedCountText');
+            const forwardButton = document.getElementById('forwardButton');
+
+            if (count > 0) {
+                countDisplay.style.display = 'block';
+                countText.textContent = `${count} chat${count > 1 ? 's' : ''} selected`;
+                forwardButton.disabled = false;
+                forwardButton.style.opacity = '1';
+                forwardButton.style.cursor = 'pointer';
+            } else {
+                countDisplay.style.display = 'none';
+                forwardButton.disabled = true;
+                forwardButton.style.opacity = '0.5';
+                forwardButton.style.cursor = 'not-allowed';
+            }
+        }
+
+        // Filter chats in forward modal
+        function filterForwardChats(query) {
+            query = query.toLowerCase().trim();
+
+            const chatItems = document.querySelectorAll('.forward-chat-item');
+
+            chatItems.forEach(item => {
+                const chatName = item.dataset.chatName || '';
+
+                if (chatName.includes(query)) {
+                    item.style.display = 'flex';
+                } else {
+                    item.style.display = 'none';
+                }
+            });
+        }
+
+        async function confirmForward() {
+            if (selectedForwardChats.size === 0) {
+                showError('Please select at least one chat');
+                return;
+            }
+
+            if (!messageToForward) {
+                showError('No message to forward');
+                return;
+            }
+
+            try {
+                console.log('📤 Forwarding message', messageToForward, 'to', selectedForwardChats.size, 'chat(s)');
+
+                // Show loading state
+                const forwardBtn = document.getElementById('forwardButton');
+                const btnText = document.getElementById('forwardButtonText');
+                const btnLoading = document.getElementById('forwardButtonLoading');
+
+                forwardBtn.disabled = true;
+                forwardBtn.style.opacity = '0.6';
+                btnText.style.display = 'none';
+                btnLoading.style.display = 'inline';
+                btnLoading.innerHTML = '<span class="loading-spinner"></span>Forwarding...';
+
+                const response = await fetch(API_URL + '/messages/forward', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({
+                        message_id: messageToForward,
+                        chat_ids: Array.from(selectedForwardChats)
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    console.log('✅ Forward successful:', data.forwarded_count, 'chats');
+
+                    showNotification('Success', `Message forwarded to ${data.forwarded_count} chat${data.forwarded_count > 1 ? 's' : ''}`);
+
+                    // Close modal and cleanup
+                    closeModal('forwardMessageModal');
+                    messageToForward = null;
+                    selectedForwardChats.clear();
+
+                    // Reload chats to show new messages
+                    await loadChats();
+
+                } else {
+                    console.error('❌ Forward failed:', data.error);
+                    showError(data.error || 'Failed to forward message');
+                }
+
+                // Restore button state
+                btnText.style.display = 'inline';
+                btnLoading.style.display = 'none';
+                forwardBtn.disabled = false;
+                forwardBtn.style.opacity = '1';
+
+            } catch (error) {
+                console.error('❌ Forward error:', error);
+                showError('Forward failed: ' + error.message);
+
+                // Restore button state
+                const forwardBtn = document.getElementById('forwardButton');
+                const btnText = document.getElementById('forwardButtonText');
+                const btnLoading = document.getElementById('forwardButtonLoading');
+
+                btnText.style.display = 'inline';
+                btnLoading.style.display = 'none';
+                forwardBtn.disabled = false;
+                forwardBtn.style.opacity = '1';
+            }
+        }
+
+        function copyMessage() {
+            if (!currentContextMessage) return;
+
+            const msgEl = document.querySelector(`[data-message-id="${currentContextMessage}"]`);
+            if (msgEl) {
+                const textEl = msgEl.querySelector('.message-text');
+                if (textEl) {
+                    navigator.clipboard.writeText(textEl.textContent)
+                        .then(() => showNotification('Copied', 'Message copied to clipboard'))
+                        .catch(() => showError('Copy failed'));
+                }
+            }
+
+            document.getElementById('messageContextMenu').style.display = 'none';
+        }
+
+        let replyToMessageId = null;
+
+        function replyToMessage() {
+            if (!currentContextMessage) {
+                showError('No message selected');
+                closeContextMenu();
+                return;
+            }
+
+            const msgEl = document.querySelector(`[data-message-id="${currentContextMessage}"]`);
+            if (!msgEl) {
+                showError('Message not found');
+                closeContextMenu();
+                return;
+            }
+
+            const textEl = msgEl.querySelector('.message-text');
+            const messageText = textEl ? textEl.textContent : 'Message';
+            const senderName = activeChat?.name || 'User';
+
+            replyToMessageId = currentContextMessage;
+
+            // Show reply indicator above message input
+            const replyIndicator = document.createElement('div');
+            replyIndicator.id = 'replyIndicator';
+            replyIndicator.style.cssText = `
+                padding: 10px 15px;
+                background: rgba(218, 165, 32, 0.1);
+                border-left: 3px solid #DAA520;
+                margin: 0 20px;
+                border-radius: 5px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            `;
+            replyIndicator.innerHTML = `
+                <div>
+                    <div style="font-size: 12px; color: #DAA520; font-weight: 600;">↩️ Replying to ${escapeHtml(senderName)}</div>
+                    <div style="font-size: 13px; color: #888; margin-top: 3px;">${escapeHtml(messageText.substring(0, 50))}${messageText.length > 50 ? '...' : ''}</div>
+                </div>
+                <button onclick="cancelReply()" style="background: none; border: none; color: #888; cursor: pointer; font-size: 18px;">✕</button>
+            `;
+
+            // Remove existing reply indicator if any
+            const existingIndicator = document.getElementById('replyIndicator');
+            if (existingIndicator) {
+                existingIndicator.remove();
+            }
+
+            // Insert before message input container
+            const inputContainer = document.querySelector('.message-input-container');
+            inputContainer.parentElement.insertBefore(replyIndicator, inputContainer);
+
+            // Focus on message input
+            document.getElementById('messageInput').focus();
+
+            closeContextMenu();
+            showNotification('Reply', 'Reply message will be sent with your next message');
+        }
+
+        function checkFilePreviewStatus() {
+            const container = document.getElementById('filePreviewContainer');
+            console.log('🔍 File Preview Status:', {
+                selectedFiles: selectedFiles.length,
+                fileNames: selectedFiles.map(f => f.name),
+                containerExists: !!container,
+                containerDisplay: container?.style.display,
+                containerChildren: container?.children.length,
+                containerVisible: container?.offsetParent !== null
+            });
+
+            alert(`Files: ${selectedFiles.length}\nContainer visible: ${container?.offsetParent !== null}\nChildren: ${container?.children.length}`);
+        }
+
+        // Show debug button on mobile
+        if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
+            const debugFileBtn = document.getElementById('debugFileBtn');
+            if (debugFileBtn) debugFileBtn.style.display = 'block';
+        }
+
+        function cancelReply() {
+            replyToMessageId = null;
+            const indicator = document.getElementById('replyIndicator');
+            if (indicator) {
+                indicator.remove();
+            }
+        }
+
+        let messageToEdit = null;
+        function editMessage() {
+            if (!currentContextMessage) {
+                showError('No message selected');
+                closeContextMenu();
+                return;
+            }
+
+            const msgEl = document.querySelector(`[data-message-id="${currentContextMessage}"]`);
+            if (!msgEl) {
+                showError('Message not found');
+                closeContextMenu();
+                return;
+            }
+
+            const textEl = msgEl.querySelector('.message-text');
+            if (!textEl) {
+                showError('Cannot edit this message');
+                closeContextMenu();
+                return;
+            }
+
+            const originalText = textEl.textContent;
+
+            // Check if user is the sender
+            const isSent = msgEl.classList.contains('sent');
+            if (!isSent) {
+                showError('You can only edit your own messages');
+                closeContextMenu();
+                document.getElementById('messageContextMenu').style.display = 'none';
+                return;
+            }
+
+            messageToEdit = currentContextMessage;
+
+            // Show edit modal
+            document.getElementById('editMessageText').value = originalText;
+            closeContextMenu();
+            document.getElementById('messageContextMenu').style.display = 'none';
+            document.getElementById('editMessageModal').classList.add('active');
+        }
+
+        async function saveEditedMessage() {
+            if (!messageToEdit) {
+                showError('No message to edit');
+                return;
+            }
+
+            const newContent = document.getElementById('editMessageText').value.trim();
+
+            if (!newContent) {
+                showError('Message cannot be empty');
+                return;
+            }
+
+            try {
+                console.log('✏️ Editing message:', messageToEdit);
+
+                const response = await fetch(API_URL + `/messages/${messageToEdit}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ content: newContent })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    // Update UI
+                    const msgEl = document.querySelector(`[data-message-id="${messageToEdit}"]`);
+                    if (msgEl) {
+                        const textEl = msgEl.querySelector('.message-text');
+                        if (textEl) {
+                            textEl.textContent = newContent;
+                        }
+
+                        // Add edited indicator if not present
+                        const infoEl = msgEl.querySelector('.message-info');
+                        if (infoEl && !infoEl.querySelector('[title="Edited"]')) {
+                            const editedSpan = document.createElement('span');
+                            editedSpan.title = 'Edited';
+                            editedSpan.textContent = '✏️';
+                            infoEl.insertBefore(editedSpan, infoEl.lastChild);
+                        }
+                    }
+
+                    showNotification('Success', 'Message edited');
+                    closeModal('editMessageModal');
+                    messageToEdit = null;
+                    document.getElementById('editMessageText').value = '';
+                } else {
+                    showError(data.error || 'Edit failed');
+                }
+
+            } catch (error) {
+                console.error('❌ Edit error:', error);
+                showError('Edit failed: ' + error.message);
+            }
+        }
+
+        function cancelEdit() {
+            messageToEdit = null;
+            document.getElementById('editMessageText').value = '';
+            closeModal('editMessageModal');
+        }
+
+        // Update sendPhoneVerification to show OTP in dev mode
+        async function sendPhoneVerification() {
+            const phone = document.getElementById('phoneVerificationInput').value.trim();
+
+            if (!phone) {
+                showError('Please enter your phone number');
+                return;
+            }
+
+            try {
+                const response = await fetch(API_URL + '/auth/send-verification-code', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ phone })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    phoneToVerify = phone;
+                    document.getElementById('verificationPhone').textContent = phone;
+                    document.getElementById('phoneVerificationStep1').style.display = 'none';
+                    document.getElementById('phoneVerificationStep2').style.display = 'block';
+
+                    // Show OTP in dev mode
+                    if (data.dev_otp) {
+                        showNotification('Dev Mode', `OTP: ${data.dev_otp}`);
+                        console.log('📱 DEV OTP:', data.dev_otp);
+                    } else {
+                        showNotification('Success', 'Verification code sent!');
+                    }
+                } else {
+                    showError(data.error || 'Failed to send code');
+                }
+            } catch (error) {
+                console.error('Send verification error:', error);
+                showError('Failed to send code');
+            }
+        }
+
+        async function verifyPhoneCode() {
+            const code = document.getElementById('phoneVerificationCode').value.trim();
+
+            if (!code || code.length !== 6) {
+                showError('Please enter the 6-digit code');
+                return;
+            }
+
+            try {
+                const response = await fetch(API_URL + '/auth/verify-phone', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({
+                        phone: phoneToVerify,
+                        code: code
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    showNotification('Success', 'Phone verified successfully!');
+                    closeModal('phoneVerificationModal');
+                    document.getElementById('phoneVerificationCode').value = '';
+                    document.getElementById('phoneVerificationStep1').style.display = 'block';
+                    document.getElementById('phoneVerificationStep2').style.display = 'none';
+
+                    // Update current user
+                    currentUser.phone = data.phone;
+                    localStorage.setItem('current_user', JSON.stringify(currentUser));
+                } else {
+                    showError(data.error || 'Verification failed');
+                }
+            } catch (error) {
+                console.error('Verification error:', error);
+                showError('Verification failed');
+            }
+        }
+
+        // Main page load event - SINGLE VERSION (no duplicates)
+        window.addEventListener('load', async () => {
+            console.log('🚀 Page loaded, initializing services...');
+
+            // Fetch fresh TURN credentials
+            const iceServers = await fetchTURNCredentials();
+
+            rtcConfig = {
+                iceServers: iceServers,
+                iceCandidatePoolSize: 10,
+                bundlePolicy: 'max-bundle',
+                rtcpMuxPolicy: 'require',
+                iceTransportPolicy: 'all'
+            };
+
+            console.log('✅ WebRTC config ready');
+
+            // Test TURN connectivity
+            setTimeout(() => testTURNServer(), 2000);
+
+            // Initialize country codes
+            initializeCountryCodeDropdown();
+
+            // Check for saved token (auto-login)
+            const savedToken = localStorage.getItem('auth_token');
+            const savedUser = localStorage.getItem('current_user');
+
+            if (savedToken && savedUser) {
+                authToken = savedToken;
+                currentUser = JSON.parse(savedUser);
+                showChatInterface();
+            }
+
+            // Set up Google button with initial disabled state
+            const googleBtn = document.querySelector('.btn-google');
+            if (googleBtn && !googleInitialized) {
+                googleBtn.style.opacity = '0.6';
+                googleBtn.style.cursor = 'not-allowed';
+                googleBtn.disabled = true;
+            }
+
+            console.log('✅ Page initialization complete');
+        });
+        function showError(message) {
+            console.error('Error:', message);
+
+            // Show in UI login error div (if visible)
+            const errorEl = document.getElementById('errorMessage');
+            if (errorEl && errorEl.offsetParent !== null) {
+                errorEl.textContent = message;
+                errorEl.style.display = 'block';
+                setTimeout(() => errorEl.style.display = 'none', 5000);
+            }
+
+            // ALWAYS show toast notification (works on all screens)
+            showToast(message, 'error');
+
+            // Also show as browser notification if available
+            if (typeof showNotification === 'function' && Notification.permission === 'granted') {
+                showNotification('Error', message);
+            }
+        }
+
+        // Google Sign-In function
+        async function signInWithGoogle() {
+            if (!googleInitialized || typeof google === 'undefined' || !google.accounts) {
+                showError('Google Sign-In is still loading... Please wait and try again.');
+                return;
+            }
+
+            try {
+                console.log('🔐 Starting Google Sign-In...');
+
+                // Show loading state
+                const googleBtn = document.querySelector('.btn-google');
+                const googleBtnText = document.getElementById('googleBtnText');
+                const googleBtnLoading = document.getElementById('googleBtnLoading');
+
+                if (googleBtn && googleBtnText && googleBtnLoading) {
+                    googleBtn.disabled = true;
+                    googleBtnText.style.display = 'none';
+                    googleBtnLoading.style.display = 'inline';
+                }
+
+                const client = google.accounts.oauth2.initTokenClient({
+                    client_id: GOOGLE_CLIENT_ID,
+                    scope: 'email profile openid',
+                    callback: async (response) => {
+                        if (response.error) {
+                            console.error('Google OAuth error:', response.error);
+                            showError('Google Sign-In failed: ' + response.error);
+
+                            // Reset button state
+                            if (googleBtn && googleBtnText && googleBtnLoading) {
+                                googleBtn.disabled = false;
+                                googleBtnText.style.display = 'inline';
+                                googleBtnLoading.style.display = 'none';
+                            }
+                            return;
+                        }
+
+                        try {
+                            console.log('✅ Got Google token, fetching user info...');
+
+                            // Get user info from Google
+                            const userInfoResponse = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+                                headers: { 'Authorization': `Bearer ${response.access_token}` }
+                            });
+
+                            if (!userInfoResponse.ok) {
+                                throw new Error('Failed to fetch Google user info');
+                            }
+
+                            const userInfo = await userInfoResponse.json();
+                            console.log('✅ Got user info:', userInfo.email);
+
+                            // Send to your backend
+                            const apiResponse = await fetch(API_URL + '/auth/google', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    email: userInfo.email,
+                                    name: userInfo.name,
+                                    picture: userInfo.picture,
+                                    google_id: userInfo.sub
+                                })
+                            });
+
+                            const data = await apiResponse.json();
+
+                            if (apiResponse.ok && data.success) {
+                                authToken = data.token;
+                                currentUser = data.user;
+                                localStorage.setItem('auth_token', authToken);
+                                localStorage.setItem('current_user', JSON.stringify(currentUser));
+
+                                console.log('✅ Google Sign-In successful');
+                                showSuccess('Signed in with Google successfully!');
+                                setTimeout(() => showChatInterface(), 500);
+                            } else {
+                                console.error('Backend auth failed:', data.error);
+                                showError(data.error || 'Authentication failed');
+                            }
+                        } catch (error) {
+                            console.error('❌ Google auth error:', error);
+                            showError('Connection error: ' + error.message);
+                        } finally {
+                            // Reset button state
+                            if (googleBtn && googleBtnText && googleBtnLoading) {
+                                googleBtn.disabled = false;
+                                googleBtnText.style.display = 'inline';
+                                googleBtnLoading.style.display = 'none';
+                            }
+                        }
+                    }
+                });
+
+                // Request access token
+                client.requestAccessToken();
+
+            } catch (error) {
+                console.error('❌ Google Sign-In initialization error:', error);
+                showError('Google Sign-In failed: ' + error.message);
+
+                // Reset button state
+                const googleBtn = document.querySelector('.btn-google');
+                const googleBtnText = document.getElementById('googleBtnText');
+                const googleBtnLoading = document.getElementById('googleBtnLoading');
+
+                if (googleBtn && googleBtnText && googleBtnLoading) {
+                    googleBtn.disabled = false;
+                    googleBtnText.style.display = 'inline';
+                    googleBtnLoading.style.display = 'none';
+                }
+            }
+        }
+
+
+        function initializeGoogleSignIn() {
+            if (typeof google !== 'undefined' && google.accounts) {
+                console.log('✅ Google Sign-In library loaded');
+                googleInitialized = true;
+
+                // Enable the Google button
+                const googleBtn = document.querySelector('.btn-google');
+                if (googleBtn) {
+                    googleBtn.style.opacity = '1';
+                    googleBtn.style.cursor = 'pointer';
+                    googleBtn.disabled = false;
+                }
+            }
+        }
+
+        // ==================== EMOJI SUPPORT ====================
+
+        // Comprehensive emoji database with NLP keywords
+        const emojiDatabase = {
+            smileys: [
+                { emoji: '😀', keywords: ['happy', 'smile', 'grin', 'joy', 'pleased'] },
+                { emoji: '😃', keywords: ['happy', 'smile', 'joy', 'excited'] },
+                { emoji: '😄', keywords: ['happy', 'smile', 'laugh', 'joy'] },
+                { emoji: '😁', keywords: ['happy', 'smile', 'grin', 'beam'] },
+                { emoji: '😆', keywords: ['laugh', 'happy', 'lol', 'haha'] },
+                { emoji: '😅', keywords: ['sweat', 'laugh', 'nervous', 'relief'] },
+                { emoji: '🤣', keywords: ['laugh', 'rofl', 'lol', 'rolling'] },
+                { emoji: '😂', keywords: ['laugh', 'cry', 'joy', 'tears', 'lol'] },
+                { emoji: '🙂', keywords: ['smile', 'happy', 'slight'] },
+                { emoji: '🙃', keywords: ['upside', 'down', 'silly'] },
+                { emoji: '😉', keywords: ['wink', 'flirt', 'playful'] },
+                { emoji: '😊', keywords: ['blush', 'happy', 'smile', 'pleased'] },
+                { emoji: '😇', keywords: ['angel', 'innocent', 'halo'] },
+                { emoji: '🥰', keywords: ['love', 'hearts', 'adore', 'crush'] },
+                { emoji: '😍', keywords: ['love', 'heart', 'eyes', 'crush'] },
+                { emoji: '🤩', keywords: ['star', 'struck', 'amazed', 'wow'] },
+                { emoji: '😘', keywords: ['kiss', 'love', 'blowing'] },
+                { emoji: '😗', keywords: ['kiss', 'whistle'] },
+                { emoji: '😚', keywords: ['kiss', 'closed', 'eyes'] },
+                { emoji: '😙', keywords: ['kiss', 'smile'] },
+                { emoji: '🥲', keywords: ['tear', 'smile', 'grateful', 'touched'] },
+                { emoji: '😋', keywords: ['yum', 'delicious', 'tasty', 'savoring'] },
+                { emoji: '😛', keywords: ['tongue', 'playful', 'silly'] },
+                { emoji: '😜', keywords: ['wink', 'tongue', 'crazy', 'fun'] },
+                { emoji: '🤪', keywords: ['zany', 'crazy', 'wild', 'goofy'] },
+                { emoji: '😝', keywords: ['tongue', 'closed', 'eyes', 'playful'] },
+                { emoji: '🤑', keywords: ['money', 'rich', 'dollar', 'greedy'] },
+                { emoji: '🤗', keywords: ['hug', 'embrace', 'friendly'] },
+                { emoji: '🤭', keywords: ['oops', 'secret', 'giggle'] },
+                { emoji: '🤫', keywords: ['shush', 'quiet', 'secret'] },
+                { emoji: '🤔', keywords: ['think', 'hmm', 'wondering', 'pondering'] },
+                { emoji: '🤐', keywords: ['zipper', 'mouth', 'secret', 'quiet'] },
+                { emoji: '🤨', keywords: ['raised', 'eyebrow', 'skeptical', 'suspicious'] },
+                { emoji: '😐', keywords: ['neutral', 'straight', 'face', 'meh'] },
+                { emoji: '😑', keywords: ['expressionless', 'blank', 'deadpan'] },
+                { emoji: '😶', keywords: ['no', 'mouth', 'silent', 'speechless'] },
+                { emoji: '😏', keywords: ['smirk', 'sly', 'smug'] },
+                { emoji: '😒', keywords: ['unamused', 'annoyed', 'meh'] },
+                { emoji: '🙄', keywords: ['eye', 'roll', 'annoyed', 'whatever'] },
+                { emoji: '😬', keywords: ['grimace', 'awkward', 'cringe'] },
+                { emoji: '😮‍💨', keywords: ['exhale', 'relief', 'phew'] },
+                { emoji: '🤥', keywords: ['lie', 'pinocchio', 'liar'] },
+                { emoji: '😌', keywords: ['relieved', 'calm', 'peaceful'] },
+                { emoji: '😔', keywords: ['sad', 'pensive', 'down'] },
+                { emoji: '😪', keywords: ['sleepy', 'tired', 'yawn'] },
+                { emoji: '🤤', keywords: ['drool', 'hungry', 'want'] },
+                { emoji: '😴', keywords: ['sleep', 'zzz', 'tired'] },
+                { emoji: '😷', keywords: ['mask', 'sick', 'covid', 'ill'] },
+                { emoji: '🤒', keywords: ['sick', 'fever', 'ill', 'thermometer'] },
+                { emoji: '🤕', keywords: ['hurt', 'injured', 'bandage'] },
+                { emoji: '🤢', keywords: ['nauseous', 'sick', 'gross'] },
+                { emoji: '🤮', keywords: ['vomit', 'sick', 'puke'] },
+                { emoji: '🤧', keywords: ['sneeze', 'sick', 'achoo'] },
+                { emoji: '🥵', keywords: ['hot', 'sweat', 'heat'] },
+                { emoji: '🥶', keywords: ['cold', 'freezing', 'frozen'] },
+                { emoji: '🥴', keywords: ['dizzy', 'woozy', 'drunk'] },
+                { emoji: '😵', keywords: ['dizzy', 'confused', 'knocked'] },
+                { emoji: '🤯', keywords: ['mind', 'blown', 'shocked', 'exploding'] },
+                { emoji: '😳', keywords: ['flushed', 'embarrassed', 'shocked'] },
+                { emoji: '🥺', keywords: ['pleading', 'puppy', 'eyes', 'beg'] },
+                { emoji: '😦', keywords: ['frown', 'open', 'mouth', 'surprised'] },
+                { emoji: '😧', keywords: ['anguished', 'shocked', 'worried'] },
+                { emoji: '😨', keywords: ['fearful', 'scared', 'afraid'] },
+                { emoji: '😰', keywords: ['anxious', 'nervous', 'sweat'] },
+                { emoji: '😥', keywords: ['sad', 'sweat', 'disappointed'] },
+                { emoji: '😢', keywords: ['cry', 'sad', 'tear'] },
+                { emoji: '😭', keywords: ['cry', 'sobbing', 'bawl', 'tears'] },
+                { emoji: '😱', keywords: ['scream', 'fear', 'shocked', 'omg'] },
+                { emoji: '😖', keywords: ['confounded', 'frustrated', 'upset'] },
+                { emoji: '😣', keywords: ['persevere', 'struggle', 'difficult'] },
+                { emoji: '😞', keywords: ['disappointed', 'sad', 'let', 'down'] },
+                { emoji: '😓', keywords: ['downcast', 'sweat', 'sad'] },
+                { emoji: '😩', keywords: ['weary', 'tired', 'exhausted'] },
+                { emoji: '😫', keywords: ['tired', 'exhausted', 'fed', 'up'] },
+                { emoji: '🥱', keywords: ['yawn', 'tired', 'bored'] },
+                { emoji: '😤', keywords: ['triumph', 'proud', 'hmph'] },
+                { emoji: '😡', keywords: ['angry', 'mad', 'rage', 'pouting'] },
+                { emoji: '😠', keywords: ['angry', 'mad', 'annoyed'] },
+                { emoji: '🤬', keywords: ['curse', 'swear', 'angry', 'symbols'] },
+                { emoji: '👿', keywords: ['devil', 'evil', 'angry', 'horns'] },
+                { emoji: '💀', keywords: ['skull', 'dead', 'death', 'lol'] },
+                { emoji: '☠️', keywords: ['skull', 'crossbones', 'danger', 'poison'] },
+                { emoji: '💩', keywords: ['poop', 'poo', 'crap', 'shit'] },
+                { emoji: '🤡', keywords: ['clown', 'joke', 'funny'] },
+                { emoji: '👻', keywords: ['ghost', 'boo', 'spooky'] },
+                { emoji: '👽', keywords: ['alien', 'ufo', 'extraterrestrial'] },
+                { emoji: '🤖', keywords: ['robot', 'bot', 'ai'] },
+            ],
+            gestures: [
+                { emoji: '👋', keywords: ['wave', 'hello', 'hi', 'bye', 'goodbye'] },
+                { emoji: '🤚', keywords: ['raised', 'back', 'hand', 'stop'] },
+                { emoji: '🖐️', keywords: ['hand', 'raised', 'five', 'fingers'] },
+                { emoji: '✋', keywords: ['hand', 'raised', 'stop', 'palm'] },
+                { emoji: '🖖', keywords: ['vulcan', 'spock', 'star', 'trek'] },
+                { emoji: '👌', keywords: ['ok', 'okay', 'good', 'perfect'] },
+                { emoji: '🤌', keywords: ['pinched', 'fingers', 'italian'] },
+                { emoji: '🤏', keywords: ['pinch', 'small', 'tiny'] },
+                { emoji: '✌️', keywords: ['peace', 'victory', 'two'] },
+                { emoji: '🤞', keywords: ['fingers', 'crossed', 'luck', 'hope'] },
+                { emoji: '🤟', keywords: ['love', 'you', 'sign'] },
+                { emoji: '🤘', keywords: ['rock', 'metal', 'horns'] },
+                { emoji: '🤙', keywords: ['call', 'me', 'hang', 'loose', 'shaka'] },
+                { emoji: '👈', keywords: ['left', 'point', 'finger'] },
+                { emoji: '👉', keywords: ['right', 'point', 'finger'] },
+                { emoji: '👆', keywords: ['up', 'point', 'finger'] },
+                { emoji: '🖕', keywords: ['middle', 'finger', 'rude'] },
+                { emoji: '👇', keywords: ['down', 'point', 'finger'] },
+                { emoji: '☝️', keywords: ['one', 'point', 'up', 'idea'] },
+                { emoji: '👍', keywords: ['thumbs', 'up', 'yes', 'good', 'like', 'approve'] },
+                { emoji: '👎', keywords: ['thumbs', 'down', 'no', 'bad', 'dislike'] },
+                { emoji: '✊', keywords: ['fist', 'punch', 'power', 'solidarity'] },
+                { emoji: '👊', keywords: ['fist', 'bump', 'punch', 'bro'] },
+                { emoji: '🤛', keywords: ['left', 'fist', 'bump'] },
+                { emoji: '🤜', keywords: ['right', 'fist', 'bump'] },
+                { emoji: '👏', keywords: ['clap', 'applause', 'congrats', 'bravo'] },
+                { emoji: '🙌', keywords: ['raise', 'hands', 'celebrate', 'yay', 'hooray'] },
+                { emoji: '👐', keywords: ['open', 'hands', 'hug'] },
+                { emoji: '🤲', keywords: ['palms', 'up', 'together', 'pray'] },
+                { emoji: '🤝', keywords: ['handshake', 'deal', 'agreement'] },
+                { emoji: '🙏', keywords: ['pray', 'thanks', 'please', 'namaste', 'grateful'] },
+            ],
+            people: [
+                { emoji: '👶', keywords: ['baby', 'infant', 'child'] },
+                { emoji: '👧', keywords: ['girl', 'child'] },
+                { emoji: '🧒', keywords: ['child', 'kid'] },
+                { emoji: '👦', keywords: ['boy', 'child'] },
+                { emoji: '👩', keywords: ['woman', 'female', 'adult'] },
+                { emoji: '🧑', keywords: ['person', 'adult'] },
+                { emoji: '👨', keywords: ['man', 'male', 'adult'] },
+                { emoji: '👩‍🦱', keywords: ['woman', 'curly', 'hair'] },
+                { emoji: '👨‍🦱', keywords: ['man', 'curly', 'hair'] },
+                { emoji: '👩‍🦰', keywords: ['woman', 'red', 'hair'] },
+                { emoji: '👨‍🦰', keywords: ['man', 'red', 'hair'] },
+                { emoji: '👱‍♀️', keywords: ['woman', 'blonde', 'hair'] },
+                { emoji: '👱‍♂️', keywords: ['man', 'blonde', 'hair'] },
+                { emoji: '👩‍🦳', keywords: ['woman', 'white', 'hair', 'old'] },
+                { emoji: '👨‍🦳', keywords: ['man', 'white', 'hair', 'old'] },
+                { emoji: '👩‍🦲', keywords: ['woman', 'bald'] },
+                { emoji: '👨‍🦲', keywords: ['man', 'bald'] },
+                { emoji: '🧔', keywords: ['beard', 'man', 'facial', 'hair'] },
+                { emoji: '👵', keywords: ['old', 'woman', 'grandmother', 'grandma'] },
+                { emoji: '🧓', keywords: ['old', 'person', 'elderly'] },
+                { emoji: '👴', keywords: ['old', 'man', 'grandfather', 'grandpa'] },
+                { emoji: '👲', keywords: ['person', 'skullcap', 'hat'] },
+                { emoji: '👳‍♀️', keywords: ['woman', 'turban'] },
+                { emoji: '👳‍♂️', keywords: ['man', 'turban'] },
+                { emoji: '🧕', keywords: ['woman', 'headscarf', 'hijab'] },
+                { emoji: '👮‍♀️', keywords: ['woman', 'police', 'officer', 'cop'] },
+                { emoji: '👮‍♂️', keywords: ['man', 'police', 'officer', 'cop'] },
+                { emoji: '👷‍♀️', keywords: ['woman', 'construction', 'worker'] },
+                { emoji: '👷‍♂️', keywords: ['man', 'construction', 'worker'] },
+                { emoji: '💂‍♀️', keywords: ['woman', 'guard'] },
+                { emoji: '💂‍♂️', keywords: ['man', 'guard'] },
+                { emoji: '👩‍⚕️', keywords: ['woman', 'health', 'doctor', 'nurse'] },
+                { emoji: '👨‍⚕️', keywords: ['man', 'health', 'doctor'] },
+                { emoji: '👩‍🎓', keywords: ['woman', 'student', 'graduate'] },
+                { emoji: '👨‍🎓', keywords: ['man', 'student', 'graduate'] },
+                { emoji: '👩‍🏫', keywords: ['woman', 'teacher', 'professor'] },
+                { emoji: '👨‍🏫', keywords: ['man', 'teacher', 'professor'] },
+                { emoji: '👩‍⚖️', keywords: ['woman', 'judge', 'lawyer'] },
+                { emoji: '👨‍⚖️', keywords: ['man', 'judge', 'lawyer'] },
+                { emoji: '👩‍🌾', keywords: ['woman', 'farmer'] },
+                { emoji: '👨‍🌾', keywords: ['man', 'farmer'] },
+                { emoji: '👩‍🍳', keywords: ['woman', 'cook', 'chef'] },
+                { emoji: '👨‍🍳', keywords: ['man', 'cook', 'chef'] },
+                { emoji: '👩‍🔧', keywords: ['woman', 'mechanic'] },
+                { emoji: '👨‍🔧', keywords: ['man', 'mechanic'] },
+                { emoji: '👩‍🏭', keywords: ['woman', 'factory', 'worker'] },
+                { emoji: '👨‍🏭', keywords: ['man', 'factory', 'worker'] },
+                { emoji: '👩‍💼', keywords: ['woman', 'office', 'business', 'worker'] },
+                { emoji: '👨‍💼', keywords: ['man', 'office', 'business', 'worker'] },
+                { emoji: '👩‍🔬', keywords: ['woman', 'scientist'] },
+                { emoji: '👨‍🔬', keywords: ['man', 'scientist'] },
+                { emoji: '👩‍💻', keywords: ['woman', 'technologist', 'coder', 'programmer'] },
+                { emoji: '👨‍💻', keywords: ['man', 'technologist', 'coder', 'programmer'] },
+                { emoji: '👩‍🎤', keywords: ['woman', 'singer', 'artist'] },
+                { emoji: '👨‍🎤', keywords: ['man', 'singer', 'artist'] },
+                { emoji: '👩‍🎨', keywords: ['woman', 'artist', 'painter'] },
+                { emoji: '👨‍🎨', keywords: ['man', 'artist', 'painter'] },
+                { emoji: '👩‍✈️', keywords: ['woman', 'pilot'] },
+                { emoji: '👨‍✈️', keywords: ['man', 'pilot'] },
+                { emoji: '👩‍🚀', keywords: ['woman', 'astronaut'] },
+                { emoji: '👨‍🚀', keywords: ['man', 'astronaut'] },
+                { emoji: '👩‍🚒', keywords: ['woman', 'firefighter'] },
+                { emoji: '👨‍🚒', keywords: ['man', 'firefighter'] },
+                { emoji: '👮', keywords: ['police', 'officer', 'cop'] },
+                { emoji: '🕵️', keywords: ['detective', 'spy', 'sleuth'] },
+                { emoji: '💁‍♀️', keywords: ['woman', 'information', 'help'] },
+                { emoji: '💁‍♂️', keywords: ['man', 'information', 'help'] },
+                { emoji: '🙅‍♀️', keywords: ['woman', 'no', 'stop', 'gesture'] },
+                { emoji: '🙅‍♂️', keywords: ['man', 'no', 'stop', 'gesture'] },
+                { emoji: '🙆‍♀️', keywords: ['woman', 'ok', 'yes'] },
+                { emoji: '🙆‍♂️', keywords: ['man', 'ok', 'yes'] },
+                { emoji: '🙋‍♀️', keywords: ['woman', 'raising', 'hand', 'question'] },
+                { emoji: '🙋‍♂️', keywords: ['man', 'raising', 'hand', 'question'] },
+                { emoji: '🤦‍♀️', keywords: ['woman', 'facepalm', 'disappointed'] },
+                { emoji: '🤦‍♂️', keywords: ['man', 'facepalm', 'disappointed'] },
+                { emoji: '🤷‍♀️', keywords: ['woman', 'shrug', 'dunno', 'whatever'] },
+                { emoji: '🤷‍♂️', keywords: ['man', 'shrug', 'dunno', 'whatever'] },
+                { emoji: '🙎‍♀️', keywords: ['woman', 'pouting'] },
+                { emoji: '🙎‍♂️', keywords: ['man', 'pouting'] },
+                { emoji: '🙍‍♀️', keywords: ['woman', 'frowning'] },
+                { emoji: '🙍‍♂️', keywords: ['man', 'frowning'] },
+                { emoji: '💇‍♀️', keywords: ['woman', 'haircut'] },
+                { emoji: '💇‍♂️', keywords: ['man', 'haircut'] },
+                { emoji: '💆‍♀️', keywords: ['woman', 'massage', 'spa'] },
+                { emoji: '💆‍♂️', keywords: ['man', 'massage', 'spa'] },
+                { emoji: '🧖‍♀️', keywords: ['woman', 'steamy', 'sauna'] },
+                { emoji: '🧖‍♂️', keywords: ['man', 'steamy', 'sauna'] },
+                { emoji: '💅', keywords: ['nail', 'polish', 'manicure'] },
+                { emoji: '🤳', keywords: ['selfie', 'photo', 'camera'] },
+                { emoji: '💃', keywords: ['woman', 'dancing', 'dance'] },
+                { emoji: '🕺', keywords: ['man', 'dancing', 'dance'] },
+                { emoji: '👯‍♀️', keywords: ['women', 'bunny', 'ears', 'party'] },
+                { emoji: '👯‍♂️', keywords: ['men', 'bunny', 'ears', 'party'] },
+                { emoji: '🕴️', keywords: ['person', 'suit', 'levitate', 'business'] },
+                { emoji: '👤', keywords: ['silhouette', 'user', 'person'] },
+                { emoji: '👥', keywords: ['silhouettes', 'users', 'people'] },
+                { emoji: '🫂', keywords: ['people', 'hugging', 'hug', 'embrace'] },
+                { emoji: '👪', keywords: ['family', 'parents', 'children'] },
+                { emoji: '👨‍👩‍👧', keywords: ['family', 'parents', 'child'] },
+                { emoji: '👨‍👩‍👧‍👦', keywords: ['family', 'parents', 'children'] },
+                { emoji: '👨‍👩‍👦‍👦', keywords: ['family', 'parents', 'sons'] },
+                { emoji: '👨‍👩‍👧‍👧', keywords: ['family', 'parents', 'daughters'] },
+                { emoji: '👩‍👩‍👦', keywords: ['family', 'mothers', 'son'] },
+                { emoji: '👩‍👩‍👧', keywords: ['family', 'mothers', 'daughter'] },
+                { emoji: '👩‍👩‍👧‍👦', keywords: ['family', 'mothers', 'children'] },
+                { emoji: '👩‍👩‍👦‍👦', keywords: ['family', 'mothers', 'sons'] },
+                { emoji: '👩‍👩‍👧‍👧', keywords: ['family', 'mothers', 'daughters'] },
+                { emoji: '👨‍👨‍👦', keywords: ['family', 'fathers', 'son'] },
+                { emoji: '👨‍👨‍👧', keywords: ['family', 'fathers', 'daughter'] },
+                { emoji: '👨‍👨‍👧‍👦', keywords: ['family', 'fathers', 'children'] },
+                { emoji: '👨‍👨‍👦‍👦', keywords: ['family', 'fathers', 'sons'] },
+                { emoji: '👨‍👨‍👧‍👧', keywords: ['family', 'fathers', 'daughters'] },
+                { emoji: '👩‍👦', keywords: ['mother', 'son', 'family'] },
+                { emoji: '👩‍👧', keywords: ['mother', 'daughter', 'family'] },
+                { emoji: '👩‍👧‍👦', keywords: ['mother', 'children', 'family'] },
+                { emoji: '👩‍👦‍👦', keywords: ['mother', 'sons', 'family'] },
+                { emoji: '👩‍👧‍👧', keywords: ['mother', 'daughters', 'family'] },
+                { emoji: '👨‍👦', keywords: ['father', 'son', 'family'] },
+                { emoji: '👨‍👧', keywords: ['father', 'daughter', 'family'] },
+                { emoji: '👨‍👧‍👦', keywords: ['father', 'children', 'family'] },
+                { emoji: '👨‍👦‍👦', keywords: ['father', 'sons', 'family'] },
+                { emoji: '👨‍👧‍👧', keywords: ['father', 'daughters', 'family'] },
+            ],
+            animals: [
+                { emoji: '🐶', keywords: ['dog', 'puppy', 'pet', 'woof'] },
+                { emoji: '🐱', keywords: ['cat', 'kitten', 'pet', 'meow'] },
+                { emoji: '🐭', keywords: ['mouse', 'rat', 'rodent'] },
+                { emoji: '🐹', keywords: ['hamster', 'pet', 'rodent'] },
+                { emoji: '🐰', keywords: ['rabbit', 'bunny', 'pet'] },
+                { emoji: '🦊', keywords: ['fox', 'animal'] },
+                { emoji: '🐻', keywords: ['bear', 'animal'] },
+                { emoji: '🐼', keywords: ['panda', 'bear', 'animal'] },
+                { emoji: '🐨', keywords: ['koala', 'animal', 'australia'] },
+                { emoji: '🐯', keywords: ['tiger', 'animal'] },
+                { emoji: '🦁', keywords: ['lion', 'king', 'animal'] },
+                { emoji: '🐮', keywords: ['cow', 'animal', 'moo'] },
+                { emoji: '🐷', keywords: ['pig', 'animal', 'oink'] },
+                { emoji: '🐽', keywords: ['pig', 'nose', 'animal'] },
+                { emoji: '🐸', keywords: ['frog', 'animal', 'ribbit'] },
+                { emoji: '🐵', keywords: ['monkey', 'animal'] },
+                { emoji: '🙈', keywords: ['monkey', 'see', 'no', 'evil'] },
+                { emoji: '🙉', keywords: ['monkey', 'hear', 'no', 'evil'] },
+                { emoji: '🙊', keywords: ['monkey', 'speak', 'no', 'evil'] },
+                { emoji: '🐒', keywords: ['monkey', 'animal'] },
+                { emoji: '🐔', keywords: ['chicken', 'bird', 'animal'] },
+                { emoji: '🐧', keywords: ['penguin', 'bird', 'animal'] },
+                { emoji: '🐦', keywords: ['bird', 'animal'] },
+                { emoji: '🐤', keywords: ['baby', 'chick', 'bird'] },
+                { emoji: '🐣', keywords: ['hatching', 'chick', 'bird'] },
+                { emoji: '🐥', keywords: ['front', 'facing', 'baby', 'chick'] },
+                { emoji: '🦆', keywords: ['duck', 'bird', 'quack'] },
+                { emoji: '🦅', keywords: ['eagle', 'bird'] },
+                { emoji: '🦉', keywords: ['owl', 'bird', 'wise'] },
+                { emoji: '🦇', keywords: ['bat', 'animal', 'vampire'] },
+                { emoji: '🐺', keywords: ['wolf', 'animal', 'howl'] },
+                { emoji: '🐗', keywords: ['boar', 'pig', 'animal'] },
+                { emoji: '🐴', keywords: ['horse', 'animal'] },
+                { emoji: '🦄', keywords: ['unicorn', 'magical', 'fantasy'] },
+                { emoji: '🐝', keywords: ['bee', 'insect', 'honey'] },
+                { emoji: '🐛', keywords: ['bug', 'insect', 'caterpillar'] },
+                { emoji: '🦋', keywords: ['butterfly', 'insect'] },
+                { emoji: '🐌', keywords: ['snail', 'slow'] },
+                { emoji: '🐞', keywords: ['ladybug', 'insect'] },
+                { emoji: '🐜', keywords: ['ant', 'insect'] },
+                { emoji: '🦟', keywords: ['mosquito', 'insect', 'bite'] },
+                { emoji: '🦗', keywords: ['cricket', 'insect'] },
+                { emoji: '🕷️', keywords: ['spider', 'insect', 'web'] },
+                { emoji: '🦂', keywords: ['scorpion', 'zodiac'] },
+                { emoji: '🐢', keywords: ['turtle', 'slow', 'animal'] },
+                { emoji: '🐍', keywords: ['snake', 'reptile'] },
+                { emoji: '🦎', keywords: ['lizard', 'reptile'] },
+                { emoji: '🦖', keywords: ['t-rex', 'dinosaur'] },
+                { emoji: '🦕', keywords: ['sauropod', 'dinosaur'] },
+                { emoji: '🐙', keywords: ['octopus', 'sea', 'animal'] },
+                { emoji: '🦑', keywords: ['squid', 'sea', 'animal'] },
+                { emoji: '🦐', keywords: ['shrimp', 'seafood'] },
+                { emoji: '🦞', keywords: ['lobster', 'seafood'] },
+                { emoji: '🦀', keywords: ['crab', 'seafood', 'zodiac'] },
+                { emoji: '🐡', keywords: ['blowfish', 'fish'] },
+                { emoji: '🐠', keywords: ['tropical', 'fish'] },
+                { emoji: '🐟', keywords: ['fish'] },
+                { emoji: '🐬', keywords: ['dolphin', 'sea', 'animal'] },
+                { emoji: '🐳', keywords: ['spouting', 'whale'] },
+                { emoji: '🐋', keywords: ['whale', 'sea', 'animal'] },
+                { emoji: '🦈', keywords: ['shark', 'sea', 'animal', 'danger'] },
+                { emoji: '🐊', keywords: ['crocodile', 'reptile', 'alligator'] },
+                { emoji: '🐅', keywords: ['tiger', 'animal'] },
+                { emoji: '🐆', keywords: ['leopard', 'animal'] },
+                { emoji: '🦓', keywords: ['zebra', 'animal', 'stripes'] },
+                { emoji: '🦍', keywords: ['gorilla', 'monkey', 'ape'] },
+                { emoji: '🦧', keywords: ['orangutan', 'monkey', 'ape'] },
+                { emoji: '🦣', keywords: ['mammoth', 'elephant', 'extinct'] },
+                { emoji: '🐘', keywords: ['elephant', 'animal'] },
+                { emoji: '🦛', keywords: ['hippopotamus', 'hippo', 'animal'] },
+                { emoji: '🦏', keywords: ['rhinoceros', 'animal'] },
+                { emoji: '🐪', keywords: ['camel', 'one', 'hump', 'desert'] },
+                { emoji: '🐫', keywords: ['camel', 'two', 'hump', 'desert'] },
+                { emoji: '🦒', keywords: ['giraffe', 'animal', 'tall'] },
+                { emoji: '🦘', keywords: ['kangaroo', 'animal', 'australia'] },
+                { emoji: '🦬', keywords: ['bison', 'buffalo', 'animal'] },
+                { emoji: '🐃', keywords: ['water', 'buffalo', 'animal'] },
+                { emoji: '🐂', keywords: ['ox', 'bull', 'animal'] },
+                { emoji: '🐄', keywords: ['cow', 'animal', 'moo'] },
+                { emoji: '🐎', keywords: ['horse', 'racing', 'fast'] },
+                { emoji: '🐖', keywords: ['pig', 'animal'] },
+                { emoji: '🐏', keywords: ['ram', 'sheep', 'aries'] },
+                { emoji: '🐑', keywords: ['ewe', 'sheep', 'animal'] },
+                { emoji: '🦙', keywords: ['llama', 'alpaca', 'animal'] },
+                { emoji: '🐐', keywords: ['goat', 'animal'] },
+                { emoji: '🦌', keywords: ['deer', 'animal'] },
+                { emoji: '🐕', keywords: ['dog', 'pet', 'animal'] },
+                { emoji: '🐩', keywords: ['poodle', 'dog', 'pet'] },
+                { emoji: '🦮', keywords: ['guide', 'dog', 'service'] },
+                { emoji: '🐕‍🦺', keywords: ['service', 'dog'] },
+                { emoji: '🐈', keywords: ['cat', 'pet', 'animal'] },
+                { emoji: '🐈‍⬛', keywords: ['black', 'cat'] },
+                { emoji: '🐓', keywords: ['rooster', 'chicken', 'bird'] },
+                { emoji: '🦃', keywords: ['turkey', 'bird', 'thanksgiving'] },
+                { emoji: '🦚', keywords: ['peacock', 'bird', 'proud'] },
+                { emoji: '🦜', keywords: ['parrot', 'bird', 'talk'] },
+                { emoji: '🦢', keywords: ['swan', 'bird', 'elegant'] },
+                { emoji: '🦩', keywords: ['flamingo', 'bird', 'pink'] },
+                { emoji: '🕊️', keywords: ['dove', 'bird', 'peace'] },
+                { emoji: '🐇', keywords: ['rabbit', 'bunny', 'animal'] },
+                { emoji: '🦝', keywords: ['raccoon', 'animal'] },
+                { emoji: '🦨', keywords: ['skunk', 'animal', 'smell'] },
+                { emoji: '🦡', keywords: ['badger', 'animal'] },
+                { emoji: '🦦', keywords: ['otter', 'animal', 'sea'] },
+                { emoji: '🦥', keywords: ['sloth', 'animal', 'lazy', 'slow'] },
+                { emoji: '🐁', keywords: ['mouse', 'rat', 'rodent'] },
+                { emoji: '🐀', keywords: ['rat', 'rodent', 'animal'] },
+                { emoji: '🐿️', keywords: ['chipmunk', 'squirrel', 'animal'] },
+                { emoji: '🦔', keywords: ['hedgehog', 'animal', 'spiky'] },
+            ],
+            food: [
+                { emoji: '🍇', keywords: ['grapes', 'fruit', 'wine'] },
+                { emoji: '🍈', keywords: ['melon', 'fruit'] },
+                { emoji: '🍉', keywords: ['watermelon', 'fruit', 'summer'] },
+                { emoji: '🍊', keywords: ['tangerine', 'orange', 'fruit'] },
+                { emoji: '🍋', keywords: ['lemon', 'fruit', 'sour'] },
+                { emoji: '🍌', keywords: ['banana', 'fruit'] },
+                { emoji: '🍍', keywords: ['pineapple', 'fruit', 'tropical'] },
+                { emoji: '🥭', keywords: ['mango', 'fruit', 'tropical'] },
+                { emoji: '🍎', keywords: ['apple', 'fruit', 'red'] },
+                { emoji: '🍏', keywords: ['green', 'apple', 'fruit'] },
+                { emoji: '🍐', keywords: ['pear', 'fruit'] },
+                { emoji: '🍑', keywords: ['peach', 'fruit'] },
+                { emoji: '🍒', keywords: ['cherries', 'fruit'] },
+                { emoji: '🍓', keywords: ['strawberry', 'fruit', 'berry'] },
+                { emoji: '🫐', keywords: ['blueberries', 'fruit', 'berry'] },
+                { emoji: '🥝', keywords: ['kiwi', 'fruit'] },
+                { emoji: '🍅', keywords: ['tomato', 'vegetable', 'fruit'] },
+                { emoji: '🫒', keywords: ['olive', 'food'] },
+                { emoji: '🥥', keywords: ['coconut', 'fruit', 'tropical'] },
+                { emoji: '🥑', keywords: ['avocado', 'fruit', 'healthy'] },
+                { emoji: '🍆', keywords: ['eggplant', 'vegetable', 'aubergine'] },
+                { emoji: '🥔', keywords: ['potato', 'vegetable'] },
+                { emoji: '🥕', keywords: ['carrot', 'vegetable'] },
+                { emoji: '🌽', keywords: ['corn', 'vegetable', 'maize'] },
+                { emoji: '🌶️', keywords: ['hot', 'pepper', 'spicy', 'chili'] },
+                { emoji: '🫑', keywords: ['bell', 'pepper', 'vegetable'] },
+                { emoji: '🥒', keywords: ['cucumber', 'vegetable', 'pickle'] },
+                { emoji: '🥬', keywords: ['leafy', 'green', 'vegetable'] },
+                { emoji: '🥦', keywords: ['broccoli', 'vegetable'] },
+                { emoji: '🧄', keywords: ['garlic', 'vegetable', 'food'] },
+                { emoji: '🧅', keywords: ['onion', 'vegetable', 'food'] },
+                { emoji: '🍄', keywords: ['mushroom', 'food'] },
+                { emoji: '🥜', keywords: ['peanuts', 'nuts', 'food'] },
+                { emoji: '🌰', keywords: ['chestnut', 'nut', 'food'] },
+                { emoji: '🍞', keywords: ['bread', 'food', 'loaf'] },
+                { emoji: '🥐', keywords: ['croissant', 'bread', 'french'] },
+                { emoji: '🥖', keywords: ['baguette', 'bread', 'french'] },
+                { emoji: '🫓', keywords: ['flatbread', 'bread', 'pita'] },
+                { emoji: '🥨', keywords: ['pretzel', 'snack'] },
+                { emoji: '🥯', keywords: ['bagel', 'bread'] },
+                { emoji: '🥞', keywords: ['pancakes', 'breakfast'] },
+                { emoji: '🧇', keywords: ['waffle', 'breakfast'] },
+                { emoji: '🧀', keywords: ['cheese', 'food', 'dairy'] },
+                { emoji: '🍖', keywords: ['meat', 'bone', 'food'] },
+                { emoji: '🍗', keywords: ['poultry', 'leg', 'chicken', 'drumstick'] },
+                { emoji: '🥩', keywords: ['cut', 'meat', 'steak'] },
+                { emoji: '🥓', keywords: ['bacon', 'meat', 'breakfast'] },
+                { emoji: '🍔', keywords: ['hamburger', 'burger', 'fast', 'food'] },
+                { emoji: '🍟', keywords: ['fries', 'french', 'fries', 'fast', 'food'] },
+                { emoji: '🍕', keywords: ['pizza', 'slice', 'food', 'italian'] },
+                { emoji: '🌭', keywords: ['hot', 'dog', 'food'] },
+                { emoji: '🥪', keywords: ['sandwich', 'food'] },
+                { emoji: '🌮', keywords: ['taco', 'mexican', 'food'] },
+                { emoji: '🌯', keywords: ['burrito', 'wrap', 'mexican', 'food'] },
+                { emoji: '🫔', keywords: ['tamale', 'mexican', 'food'] },
+                { emoji: '🥙', keywords: ['stuffed', 'flatbread', 'gyro', 'kebab'] },
+                { emoji: '🧆', keywords: ['falafel', 'food'] },
+                { emoji: '🥚', keywords: ['egg', 'food', 'breakfast'] },
+                { emoji: '🍳', keywords: ['cooking', 'fried', 'egg', 'breakfast'] },
+                { emoji: '🥘', keywords: ['shallow', 'pan', 'food', 'paella'] },
+                { emoji: '🍲', keywords: ['pot', 'food', 'stew'] },
+                { emoji: '🫕', keywords: ['fondue', 'cheese', 'food'] },
+                { emoji: '🥣', keywords: ['bowl', 'spoon', 'cereal'] },
+                { emoji: '🥗', keywords: ['green', 'salad', 'healthy'] },
+                { emoji: '🍿', keywords: ['popcorn', 'snack', 'movie'] },
+                { emoji: '🧈', keywords: ['butter', 'dairy', 'food'] },
+                { emoji: '🧂', keywords: ['salt', 'shaker', 'seasoning'] },
+                { emoji: '🥫', keywords: ['canned', 'food', 'soup'] },
+                { emoji: '🍱', keywords: ['bento', 'box', 'japanese', 'food'] },
+                { emoji: '🍘', keywords: ['rice', 'cracker', 'japanese'] },
+                { emoji: '🍙', keywords: ['rice', 'ball', 'onigiri', 'japanese'] },
+                { emoji: '🍚', keywords: ['cooked', 'rice', 'food'] },
+                { emoji: '🍛', keywords: ['curry', 'rice', 'indian', 'food'] },
+                { emoji: '🍜', keywords: ['steaming', 'bowl', 'ramen', 'noodles'] },
+                { emoji: '🍝', keywords: ['spaghetti', 'pasta', 'italian', 'food'] },
+                { emoji: '🍠', keywords: ['roasted', 'sweet', 'potato'] },
+                { emoji: '🍢', keywords: ['oden', 'japanese', 'food'] },
+                { emoji: '🍣', keywords: ['sushi', 'japanese', 'food'] },
+                { emoji: '🍤', keywords: ['fried', 'shrimp', 'tempura'] },
+                { emoji: '🍥', keywords: ['fish', 'cake', 'swirl', 'naruto'] },
+                { emoji: '🥮', keywords: ['moon', 'cake', 'chinese'] },
+                { emoji: '🍡', keywords: ['dango', 'japanese', 'dessert'] },
+                { emoji: '🥟', keywords: ['dumpling', 'food', 'chinese'] },
+                { emoji: '🥠', keywords: ['fortune', 'cookie', 'chinese'] },
+                { emoji: '🥡', keywords: ['takeout', 'box', 'chinese', 'food'] },
+                { emoji: '🦀', keywords: ['crab', 'seafood'] },
+                { emoji: '🦞', keywords: ['lobster', 'seafood'] },
+                { emoji: '🦐', keywords: ['shrimp', 'seafood'] },
+                { emoji: '🦑', keywords: ['squid', 'seafood'] },
+                { emoji: '🦪', keywords: ['oyster', 'seafood'] },
+                { emoji: '🍦', keywords: ['soft', 'ice', 'cream', 'dessert'] },
+                { emoji: '🍧', keywords: ['shaved', 'ice', 'dessert'] },
+                { emoji: '🍨', keywords: ['ice', 'cream', 'dessert'] },
+                { emoji: '🍩', keywords: ['doughnut', 'donut', 'dessert'] },
+                { emoji: '🍪', keywords: ['cookie', 'dessert', 'biscuit'] },
+                { emoji: '🎂', keywords: ['birthday', 'cake', 'dessert'] },
+                { emoji: '🍰', keywords: ['shortcake', 'cake', 'dessert'] },
+                { emoji: '🧁', keywords: ['cupcake', 'dessert'] },
+                { emoji: '🥧', keywords: ['pie', 'dessert'] },
+                { emoji: '🍫', keywords: ['chocolate', 'bar', 'candy'] },
+                { emoji: '🍬', keywords: ['candy', 'sweet'] },
+                { emoji: '🍭', keywords: ['lollipop', 'candy', 'sweet'] },
+                { emoji: '🍮', keywords: ['custard', 'pudding', 'dessert'] },
+                { emoji: '🍯', keywords: ['honey', 'pot', 'sweet'] },
+                { emoji: '🍼', keywords: ['baby', 'bottle', 'milk'] },
+                { emoji: '🥛', keywords: ['glass', 'milk', 'dairy'] },
+                { emoji: '☕', keywords: ['coffee', 'hot', 'beverage', 'cafe'] },
+                { emoji: '🫖', keywords: ['teapot', 'tea'] },
+                { emoji: '🍵', keywords: ['teacup', 'tea', 'green'] },
+                { emoji: '🍶', keywords: ['sake', 'bottle', 'cup', 'japanese'] },
+                { emoji: '🍾', keywords: ['bottle', 'popping', 'cork', 'champagne', 'celebrate'] },
+                { emoji: '🍷', keywords: ['wine', 'glass', 'alcohol'] },
+                { emoji: '🍸', keywords: ['cocktail', 'glass', 'martini', 'alcohol'] },
+                { emoji: '🍹', keywords: ['tropical', 'drink', 'cocktail'] },
+                { emoji: '🍺', keywords: ['beer', 'mug', 'alcohol'] },
+                { emoji: '🍻', keywords: ['clinking', 'beer', 'mugs', 'cheers', 'toast'] },
+                { emoji: '🥂', keywords: ['clinking', 'glasses', 'champagne', 'toast', 'celebrate'] },
+                { emoji: '🥃', keywords: ['tumbler', 'glass', 'whiskey', 'alcohol'] },
+                { emoji: '🥤', keywords: ['cup', 'straw', 'soda'] },
+                { emoji: '🧋', keywords: ['bubble', 'tea', 'boba', 'drink'] },
+                { emoji: '🧃', keywords: ['beverage', 'box', 'juice'] },
+                { emoji: '🧉', keywords: ['mate', 'drink', 'tea'] },
+                { emoji: '🧊', keywords: ['ice', 'cube', 'cold'] },
+            ],
+            travel: [
+                { emoji: '🚗', keywords: ['car', 'automobile', 'vehicle'] },
+                { emoji: '🚕', keywords: ['taxi', 'cab', 'vehicle'] },
+                { emoji: '🚙', keywords: ['suv', 'car', 'vehicle'] },
+                { emoji: '🚌', keywords: ['bus', 'vehicle', 'public', 'transport'] },
+                { emoji: '🚎', keywords: ['trolleybus', 'bus', 'vehicle'] },
+                { emoji: '🏎️', keywords: ['racing', 'car', 'fast', 'vehicle'] },
+                { emoji: '🚓', keywords: ['police', 'car', 'vehicle', 'cop'] },
+                { emoji: '🚑', keywords: ['ambulance', 'vehicle', 'emergency'] },
+                { emoji: '🚒', keywords: ['fire', 'engine', 'truck', 'vehicle'] },
+                { emoji: '🚐', keywords: ['minibus', 'van', 'vehicle'] },
+                { emoji: '🛻', keywords: ['pickup', 'truck', 'vehicle'] },
+                { emoji: '🚚', keywords: ['delivery', 'truck', 'vehicle'] },
+                { emoji: '🚛', keywords: ['articulated', 'lorry', 'truck', 'vehicle'] },
+                { emoji: '🚜', keywords: ['tractor', 'vehicle', 'farm'] },
+                { emoji: '🏍️', keywords: ['motorcycle', 'bike', 'vehicle'] },
+                { emoji: '🛵', keywords: ['motor', 'scooter', 'vespa', 'vehicle'] },
+                { emoji: '🦽', keywords: ['manual', 'wheelchair', 'accessibility'] },
+                { emoji: '🦼', keywords: ['motorized', 'wheelchair', 'accessibility'] },
+                { emoji: '🛴', keywords: ['kick', 'scooter', 'vehicle'] },
+                { emoji: '🚲', keywords: ['bicycle', 'bike', 'cycle'] },
+                { emoji: '🛹', keywords: ['skateboard', 'skate'] },
+                { emoji: '🛼', keywords: ['roller', 'skate'] },
+                { emoji: '🚏', keywords: ['bus', 'stop', 'transport'] },
+                { emoji: '🛣️', keywords: ['motorway', 'highway', 'road'] },
+                { emoji: '🛤️', keywords: ['railway', 'track', 'train'] },
+                { emoji: '⛽', keywords: ['fuel', 'pump', 'gas', 'station'] },
+                { emoji: '🚨', keywords: ['police', 'car', 'light', 'emergency'] },
+                { emoji: '🚥', keywords: ['horizontal', 'traffic', 'light'] },
+                { emoji: '🚦', keywords: ['vertical', 'traffic', 'light'] },
+                { emoji: '🛑', keywords: ['stop', 'sign'] },
+                { emoji: '🚧', keywords: ['construction', 'warning'] },
+                { emoji: '⚓', keywords: ['anchor', 'ship', 'boat'] },
+                { emoji: '⛵', keywords: ['sailboat', 'boat', 'yacht'] },
+                { emoji: '🛶', keywords: ['canoe', 'boat'] },
+                { emoji: '🚤', keywords: ['speedboat', 'boat', 'fast'] },
+                { emoji: '🛳️', keywords: ['passenger', 'ship', 'cruise'] },
+                { emoji: '⛴️', keywords: ['ferry', 'boat', 'ship'] },
+                { emoji: '🛥️', keywords: ['motor', 'boat', 'yacht'] },
+                { emoji: '🚢', keywords: ['ship', 'boat', 'cruise'] },
+                { emoji: '✈️', keywords: ['airplane', 'plane', 'flight', 'travel'] },
+                { emoji: '🛩️', keywords: ['small', 'airplane', 'plane'] },
+                { emoji: '🛫', keywords: ['airplane', 'departure', 'takeoff'] },
+                { emoji: '🛬', keywords: ['airplane', 'arrival', 'landing'] },
+                { emoji: '🪂', keywords: ['parachute', 'skydive'] },
+                { emoji: '💺', keywords: ['seat', 'chair', 'airplane'] },
+                { emoji: '🚁', keywords: ['helicopter', 'chopper'] },
+                { emoji: '🚟', keywords: ['suspension', 'railway'] },
+                { emoji: '🚠', keywords: ['mountain', 'cableway', 'gondola'] },
+                { emoji: '🚡', keywords: ['aerial', 'tramway', 'cable', 'car'] },
+                { emoji: '🛰️', keywords: ['satellite', 'space'] },
+                { emoji: '🚀', keywords: ['rocket', 'space', 'launch'] },
+                { emoji: '🛸', keywords: ['flying', 'saucer', 'ufo', 'alien'] },
+                { emoji: '🧳', keywords: ['luggage', 'suitcase', 'travel', 'baggage'] },
+                { emoji: '⌛', keywords: ['hourglass', 'done', 'time'] },
+                { emoji: '⏳', keywords: ['hourglass', 'not', 'done', 'time', 'waiting'] },
+                { emoji: '⌚', keywords: ['watch', 'time'] },
+                { emoji: '⏰', keywords: ['alarm', 'clock', 'time'] },
+                { emoji: '⏱️', keywords: ['stopwatch', 'timer', 'time'] },
+                { emoji: '⏲️', keywords: ['timer', 'clock', 'time'] },
+                { emoji: '🕰️', keywords: ['mantelpiece', 'clock', 'time'] },
+                { emoji: '🌍', keywords: ['globe', 'showing', 'europe', 'africa', 'earth', 'world'] },
+                { emoji: '🌎', keywords: ['globe', 'showing', 'americas', 'earth', 'world'] },
+                { emoji: '🌏', keywords: ['globe', 'showing', 'asia', 'australia', 'earth', 'world'] },
+                { emoji: '🌐', keywords: ['globe', 'meridians', 'internet', 'world', 'web'] },
+                { emoji: '🗺️', keywords: ['world', 'map', 'travel'] },
+                { emoji: '🗾', keywords: ['map', 'japan'] },
+                { emoji: '🧭', keywords: ['compass', 'navigation', 'direction'] },
+                { emoji: '🏔️', keywords: ['snow', 'capped', 'mountain'] },
+                { emoji: '⛰️', keywords: ['mountain', 'peak'] },
+                { emoji: '🌋', keywords: ['volcano', 'eruption'] },
+                { emoji: '🗻', keywords: ['mount', 'fuji', 'japan', 'mountain'] },
+                { emoji: '🏕️', keywords: ['camping', 'tent', 'outdoor'] },
+                { emoji: '🏖️', keywords: ['beach', 'umbrella', 'vacation', 'summer'] },
+                { emoji: '🏜️', keywords: ['desert', 'sand', 'hot'] },
+                { emoji: '🏝️', keywords: ['desert', 'island', 'beach', 'tropical'] },
+                { emoji: '🏞️', keywords: ['national', 'park', 'nature'] },
+                { emoji: '🏟️', keywords: ['stadium', 'sports'] },
+                { emoji: '🏛️', keywords: ['classical', 'building', 'museum'] },
+                { emoji: '🏗️', keywords: ['building', 'construction', 'crane'] },
+                { emoji: '🧱', keywords: ['brick', 'wall', 'construction'] },
+                { emoji: '🪨', keywords: ['rock', 'stone'] },
+                { emoji: '🪵', keywords: ['wood', 'log', 'lumber'] },
+                { emoji: '🏘️', keywords: ['houses', 'buildings', 'neighborhood'] },
+                { emoji: '🏚️', keywords: ['derelict', 'house', 'abandoned'] },
+                { emoji: '🏠', keywords: ['house', 'home', 'building'] },
+                { emoji: '🏡', keywords: ['house', 'with', 'garden', 'home'] },
+                { emoji: '🏢', keywords: ['office', 'building', 'work'] },
+                { emoji: '🏣', keywords: ['japanese', 'post', 'office'] },
+                { emoji: '🏤', keywords: ['post', 'office', 'mail'] },
+                { emoji: '🏥', keywords: ['hospital', 'medical', 'doctor'] },
+                { emoji: '🏦', keywords: ['bank', 'money', 'finance'] },
+                { emoji: '🏨', keywords: ['hotel', 'accommodation', 'travel'] },
+                { emoji: '🏩', keywords: ['love', 'hotel', 'japan'] },
+                { emoji: '🏪', keywords: ['convenience', 'store', 'shop'] },
+                { emoji: '🏫', keywords: ['school', 'education'] },
+                { emoji: '🏬', keywords: ['department', 'store', 'shopping'] },
+                { emoji: '🏭', keywords: ['factory', 'industrial', 'building'] },
+                { emoji: '🏯', keywords: ['japanese', 'castle', 'building'] },
+                { emoji: '🏰', keywords: ['castle', 'palace', 'building'] },
+                { emoji: '💒', keywords: ['wedding', 'chapel', 'marriage'] },
+                { emoji: '🗼', keywords: ['tokyo', 'tower', 'landmark'] },
+                { emoji: '🗽', keywords: ['statue', 'of', 'liberty', 'new', 'york'] },
+                { emoji: '⛪', keywords: ['church', 'religion', 'christian'] },
+                { emoji: '🕌', keywords: ['mosque', 'islam', 'muslim'] },
+                { emoji: '🛕', keywords: ['hindu', 'temple', 'religion'] },
+                { emoji: '🕍', keywords: ['synagogue', 'jewish', 'religion'] },
+                { emoji: '⛩️', keywords: ['shinto', 'shrine', 'japanese', 'religion'] },
+                { emoji: '🕋', keywords: ['kaaba', 'mecca', 'islam'] },
+            ],
+            objects: [
+                { emoji: '⚽', keywords: ['soccer', 'ball', 'football', 'sport'] },
+                { emoji: '⚾', keywords: ['baseball', 'ball', 'sport'] },
+                { emoji: '🥎', keywords: ['softball', 'ball', 'sport'] },
+                { emoji: '🏀', keywords: ['basketball', 'ball', 'sport'] },
+                { emoji: '🏐', keywords: ['volleyball', 'ball', 'sport'] },
+                { emoji: '🏈', keywords: ['american', 'football', 'ball', 'sport'] },
+                { emoji: '🏉', keywords: ['rugby', 'football', 'ball', 'sport'] },
+                { emoji: '🎾', keywords: ['tennis', 'ball', 'sport'] },
+                { emoji: '🥏', keywords: ['flying', 'disc', 'frisbee'] },
+                { emoji: '🎳', keywords: ['bowling', 'ball', 'sport'] },
+                { emoji: '🏏', keywords: ['cricket', 'game', 'bat', 'ball'] },
+                { emoji: '🏑', keywords: ['field', 'hockey', 'stick', 'ball'] },
+                { emoji: '🏒', keywords: ['ice', 'hockey', 'stick', 'puck'] },
+                { emoji: '🥍', keywords: ['lacrosse', 'stick', 'ball'] },
+                { emoji: '🏓', keywords: ['ping', 'pong', 'table', 'tennis'] },
+                { emoji: '🏸', keywords: ['badminton', 'racquet', 'shuttlecock'] },
+                { emoji: '🥊', keywords: ['boxing', 'glove', 'sport'] },
+                { emoji: '🥋', keywords: ['martial', 'arts', 'uniform', 'karate'] },
+                { emoji: '🥅', keywords: ['goal', 'net', 'sport'] },
+                { emoji: '⛳', keywords: ['flag', 'in', 'hole', 'golf'] },
+                { emoji: '⛸️', keywords: ['ice', 'skate', 'skating'] },
+                { emoji: '🎣', keywords: ['fishing', 'pole', 'hobby'] },
+                { emoji: '🤿', keywords: ['diving', 'mask', 'scuba'] },
+                { emoji: '🎽', keywords: ['running', 'shirt', 'sport', 'athletics'] },
+                { emoji: '🎿', keywords: ['skis', 'ski', 'snow', 'sport'] },
+                { emoji: '🛷', keywords: ['sled', 'sledding', 'snow'] },
+                { emoji: '🥌', keywords: ['curling', 'stone', 'sport'] },
+                { emoji: '🎯', keywords: ['bullseye', 'dart', 'target'] },
+                { emoji: '🪀', keywords: ['yo-yo', 'toy'] },
+                { emoji: '🪁', keywords: ['kite', 'flying', 'toy'] },
+                { emoji: '🎱', keywords: ['pool', '8', 'ball', 'billiards'] },
+                { emoji: '🔮', keywords: ['crystal', 'ball', 'fortune', 'psychic'] },
+                { emoji: '🪄', keywords: ['magic', 'wand', 'wizard'] },
+                { emoji: '🧿', keywords: ['nazar', 'amulet', 'evil', 'eye'] },
+                { emoji: '🎮', keywords: ['video', 'game', 'controller', 'gaming'] },
+                { emoji: '🕹️', keywords: ['joystick', 'gaming', 'arcade'] },
+                { emoji: '🎰', keywords: ['slot', 'machine', 'gambling', 'casino'] },
+                { emoji: '🎲', keywords: ['game', 'die', 'dice', 'random'] },
+                { emoji: '🧩', keywords: ['puzzle', 'piece', 'jigsaw'] },
+                { emoji: '🧸', keywords: ['teddy', 'bear', 'toy', 'cute'] },
+                { emoji: '🪅', keywords: ['pinata', 'party', 'celebration'] },
+                { emoji: '🪆', keywords: ['nesting', 'dolls', 'matryoshka'] },
+                { emoji: '♠️', keywords: ['spade', 'suit', 'card'] },
+                { emoji: '♥️', keywords: ['heart', 'suit', 'card', 'love'] },
+                { emoji: '♦️', keywords: ['diamond', 'suit', 'card'] },
+                { emoji: '♣️', keywords: ['club', 'suit', 'card'] },
+                { emoji: '♟️', keywords: ['chess', 'pawn', 'game'] },
+                { emoji: '🃏', keywords: ['joker', 'card', 'wildcard'] },
+                { emoji: '🀄', keywords: ['mahjong', 'red', 'dragon', 'game'] },
+                { emoji: '🎴', keywords: ['flower', 'playing', 'cards', 'japanese'] },
+                { emoji: '🎭', keywords: ['performing', 'arts', 'theater', 'drama'] },
+                { emoji: '🖼️', keywords: ['framed', 'picture', 'art', 'painting'] },
+                { emoji: '🎨', keywords: ['artist', 'palette', 'art', 'painting'] },
+                { emoji: '🧵', keywords: ['thread', 'sewing', 'string'] },
+                { emoji: '🪡', keywords: ['sewing', 'needle', 'thread'] },
+                { emoji: '🧶', keywords: ['yarn', 'ball', 'knitting'] },
+                { emoji: '🪢', keywords: ['knot', 'rope', 'tie'] },
+                { emoji: '👓', keywords: ['glasses', 'eyeglasses', 'spectacles'] },
+                { emoji: '🕶️', keywords: ['sunglasses', 'dark', 'glasses', 'cool'] },
+                { emoji: '🥽', keywords: ['goggles', 'swim', 'safety'] },
+                { emoji: '🥼', keywords: ['lab', 'coat', 'scientist', 'doctor'] },
+                { emoji: '🦺', keywords: ['safety', 'vest', 'construction'] },
+                { emoji: '👔', keywords: ['necktie', 'tie', 'formal'] },
+                { emoji: '👕', keywords: ['t-shirt', 'shirt', 'clothing'] },
+                { emoji: '👖', keywords: ['jeans', 'pants', 'clothing'] },
+                { emoji: '🧣', keywords: ['scarf', 'clothing', 'winter'] },
+                { emoji: '🧤', keywords: ['gloves', 'hands', 'winter'] },
+                { emoji: '🧥', keywords: ['coat', 'jacket', 'clothing'] },
+                { emoji: '🧦', keywords: ['socks', 'feet', 'clothing'] },
+                { emoji: '👗', keywords: ['dress', 'clothing', 'fashion'] },
+                { emoji: '👘', keywords: ['kimono', 'japanese', 'clothing'] },
+                { emoji: '🥻', keywords: ['sari', 'indian', 'clothing'] },
+                { emoji: '🩱', keywords: ['one-piece', 'swimsuit', 'swimming'] },
+                { emoji: '🩲', keywords: ['briefs', 'underwear', 'clothing'] },
+                { emoji: '🩳', keywords: ['shorts', 'clothing'] },
+                { emoji: '👙', keywords: ['bikini', 'swimsuit', 'beach', 'swimming'] },
+                { emoji: '👚', keywords: ['woman', 's', 'clothes', 'clothing'] },
+                { emoji: '👛', keywords: ['purse', 'bag', 'wallet'] },
+                { emoji: '👜', keywords: ['handbag', 'bag', 'purse'] },
+                { emoji: '👝', keywords: ['clutch', 'bag', 'purse'] },
+                { emoji: '🛍️', keywords: ['shopping', 'bags', 'retail'] },
+                { emoji: '🎒', keywords: ['backpack', 'school', 'bag'] },
+                { emoji: '🩴', keywords: ['thong', 'sandal', 'flip-flop'] },
+                { emoji: '👞', keywords: ['man', 's', 'shoe', 'footwear'] },
+                { emoji: '👟', keywords: ['running', 'shoe', 'sneaker', 'athletic'] },
+                { emoji: '🥾', keywords: ['hiking', 'boot', 'footwear'] },
+                { emoji: '🥿', keywords: ['flat', 'shoe', 'footwear'] },
+                { emoji: '👠', keywords: ['high-heeled', 'shoe', 'heel', 'fashion'] },
+                { emoji: '👡', keywords: ['woman', 's', 'sandal', 'footwear'] },
+                { emoji: '🩰', keywords: ['ballet', 'shoes', 'dance'] },
+                { emoji: '👢', keywords: ['woman', 's', 'boot', 'footwear'] },
+                { emoji: '👑', keywords: ['crown', 'king', 'queen', 'royalty'] },
+                { emoji: '👒', keywords: ['woman', 's', 'hat', 'sun'] },
+                { emoji: '🎩', keywords: ['top', 'hat', 'fancy', 'formal'] },
+                { emoji: '🎓', keywords: ['graduation', 'cap', 'education'] },
+                { emoji: '🧢', keywords: ['billed', 'cap', 'baseball', 'hat'] },
+                { emoji: '🪖', keywords: ['military', 'helmet', 'army'] },
+                { emoji: '⛑️', keywords: ['rescue', 'worker', 's', 'helmet', 'safety'] },
+                { emoji: '📿', keywords: ['prayer', 'beads', 'rosary', 'religious'] },
+                { emoji: '💄', keywords: ['lipstick', 'makeup', 'cosmetics'] },
+                { emoji: '💍', keywords: ['ring', 'diamond', 'engagement', 'wedding', 'jewelry'] },
+                { emoji: '💎', keywords: ['gem', 'stone', 'diamond', 'jewel', 'precious'] },
+                { emoji: '🔇', keywords: ['muted', 'speaker', 'sound', 'off'] },
+                { emoji: '🔈', keywords: ['speaker', 'low', 'volume', 'sound'] },
+                { emoji: '🔉', keywords: ['speaker', 'medium', 'volume', 'sound'] },
+                { emoji: '🔊', keywords: ['speaker', 'high', 'volume', 'sound', 'loud'] },
+                { emoji: '📢', keywords: ['loudspeaker', 'announcement', 'broadcast'] },
+                { emoji: '📣', keywords: ['megaphone', 'cheering', 'announcement'] },
+                { emoji: '📯', keywords: ['postal', 'horn', 'trumpet'] },
+                { emoji: '🔔', keywords: ['bell', 'notification', 'alert'] },
+                { emoji: '🔕', keywords: ['bell', 'with', 'slash', 'mute', 'silent'] },
+                { emoji: '🎼', keywords: ['musical', 'score', 'music', 'notes'] },
+                { emoji: '🎵', keywords: ['musical', 'note', 'music'] },
+                { emoji: '🎶', keywords: ['musical', 'notes', 'music', 'song'] },
+                { emoji: '🎙️', keywords: ['studio', 'microphone', 'recording', 'podcast'] },
+                { emoji: '🎚️', keywords: ['level', 'slider', 'music', 'mixer'] },
+                { emoji: '🎛️', keywords: ['control', 'knobs', 'music', 'mixer'] },
+                { emoji: '🎤', keywords: ['microphone', 'sing', 'karaoke'] },
+                { emoji: '🎧', keywords: ['headphone', 'music', 'audio'] },
+                { emoji: '📻', keywords: ['radio', 'broadcast', 'music'] },
+                { emoji: '🎷', keywords: ['saxophone', 'music', 'jazz', 'instrument'] },
+                { emoji: '🪗', keywords: ['accordion', 'music', 'instrument'] },
+                { emoji: '🎸', keywords: ['guitar', 'music', 'rock', 'instrument'] },
+                { emoji: '🎹', keywords: ['musical', 'keyboard', 'piano', 'instrument'] },
+                { emoji: '🎺', keywords: ['trumpet', 'music', 'instrument'] },
+                { emoji: '🎻', keywords: ['violin', 'music', 'instrument'] },
+                { emoji: '🪕', keywords: ['banjo', 'music', 'instrument'] },
+                { emoji: '🥁', keywords: ['drum', 'music', 'instrument', 'beat'] },
+                { emoji: '🪘', keywords: ['long', 'drum', 'music', 'instrument'] },
+                { emoji: '📱', keywords: ['mobile', 'phone', 'smartphone', 'cell'] },
+                { emoji: '📲', keywords: ['mobile', 'phone', 'with', 'arrow', 'call'] },
+                { emoji: '☎️', keywords: ['telephone', 'phone', 'call'] },
+                { emoji: '📞', keywords: ['telephone', 'receiver', 'phone', 'call'] },
+                { emoji: '📟', keywords: ['pager', 'beeper'] },
+                { emoji: '📠', keywords: ['fax', 'machine'] },
+                { emoji: '🔋', keywords: ['battery', 'power', 'energy'] },
+                { emoji: '🪫', keywords: ['low', 'battery', 'power'] },
+                { emoji: '🔌', keywords: ['electric', 'plug', 'power'] },
+                { emoji: '💻', keywords: ['laptop', 'computer', 'pc'] },
+                { emoji: '🖥️', keywords: ['desktop', 'computer', 'pc'] },
+                { emoji: '🖨️', keywords: ['printer', 'print'] },
+                { emoji: '⌨️', keywords: ['keyboard', 'typing', 'computer'] },
+                { emoji: '🖱️', keywords: ['computer', 'mouse', 'click'] },
+                { emoji: '🖲️', keywords: ['trackball', 'mouse'] },
+                { emoji: '💽', keywords: ['computer', 'disk', 'minidisc'] },
+                { emoji: '💾', keywords: ['floppy', 'disk', 'save'] },
+                { emoji: '💿', keywords: ['optical', 'disk', 'cd'] },
+                { emoji: '📀', keywords: ['dvd', 'disk', 'movie'] },
+                { emoji: '🧮', keywords: ['abacus', 'math', 'calculation'] },
+                { emoji: '🎥', keywords: ['movie', 'camera', 'film', 'video'] },
+                { emoji: '🎞️', keywords: ['film', 'frames', 'movie'] },
+                { emoji: '📽️', keywords: ['film', 'projector', 'movie'] },
+                { emoji: '🎬', keywords: ['clapper', 'board', 'movie', 'film', 'action'] },
+                { emoji: '📺', keywords: ['television', 'tv', 'video'] },
+                { emoji: '📷', keywords: ['camera', 'photo', 'picture'] },
+                { emoji: '📸', keywords: ['camera', 'with', 'flash', 'photo'] },
+                { emoji: '📹', keywords: ['video', 'camera', 'recording'] },
+                { emoji: '📼', keywords: ['videocassette', 'vhs', 'tape'] },
+                { emoji: '🔍', keywords: ['magnifying', 'glass', 'tilted', 'left', 'search', 'find'] },
+                { emoji: '🔎', keywords: ['magnifying', 'glass', 'tilted', 'right', 'search'] },
+                { emoji: '🕯️', keywords: ['candle', 'light', 'fire'] },
+                { emoji: '💡', keywords: ['light', 'bulb', 'idea', 'bright'] },
+                { emoji: '🔦', keywords: ['flashlight', 'torch', 'light'] },
+                { emoji: '🏮', keywords: ['red', 'paper', 'lantern', 'japanese'] },
+                { emoji: '🪔', keywords: ['diya', 'lamp', 'oil', 'light'] },
+                { emoji: '📔', keywords: ['notebook', 'with', 'decorative', 'cover', 'book'] },
+                { emoji: '📕', keywords: ['closed', 'book', 'read'] },
+                { emoji: '📖', keywords: ['open', 'book', 'read'] },
+                { emoji: '📗', keywords: ['green', 'book', 'read'] },
+                { emoji: '📘', keywords: ['blue', 'book', 'read'] },
+                { emoji: '📙', keywords: ['orange', 'book', 'read'] },
+                { emoji: '📚', keywords: ['books', 'library', 'reading'] },
+                { emoji: '📓', keywords: ['notebook', 'write'] },
+                { emoji: '📒', keywords: ['ledger', 'notebook', 'book'] },
+                { emoji: '📃', keywords: ['page', 'with', 'curl', 'document'] },
+                { emoji: '📜', keywords: ['scroll', 'document', 'ancient'] },
+                { emoji: '📄', keywords: ['page', 'facing', 'up', 'document'] },
+                { emoji: '📰', keywords: ['newspaper', 'news', 'press'] },
+                { emoji: '🗞️', keywords: ['rolled-up', 'newspaper', 'news'] },
+                { emoji: '📑', keywords: ['bookmark', 'tabs', 'organize'] },
+                { emoji: '🔖', keywords: ['bookmark', 'save', 'mark'] },
+                { emoji: '🏷️', keywords: ['label', 'tag', 'price'] },
+                { emoji: '💰', keywords: ['money', 'bag', 'dollar', 'rich', 'wealth'] },
+                { emoji: '🪙', keywords: ['coin', 'money', 'currency'] },
+                { emoji: '💴', keywords: ['yen', 'banknote', 'money', 'japanese'] },
+                { emoji: '💵', keywords: ['dollar', 'banknote', 'money', 'usd'] },
+                { emoji: '💶', keywords: ['euro', 'banknote', 'money'] },
+                { emoji: '💷', keywords: ['pound', 'banknote', 'money', 'british'] },
+                { emoji: '💸', keywords: ['money', 'with', 'wings', 'dollar', 'fly', 'spend'] },
+                { emoji: '💳', keywords: ['credit', 'card', 'payment', 'money'] },
+                { emoji: '🧾', keywords: ['receipt', 'bill', 'payment'] },
+                { emoji: '💹', keywords: ['chart', 'increasing', 'with', 'yen', 'stocks'] },
+                { emoji: '✉️', keywords: ['envelope', 'email', 'letter', 'mail'] },
+                { emoji: '📧', keywords: ['e-mail', 'email', 'mail'] },
+                { emoji: '📨', keywords: ['incoming', 'envelope', 'mail'] },
+                { emoji: '📩', keywords: ['envelope', 'with', 'arrow', 'send', 'mail'] },
+                { emoji: '📤', keywords: ['outbox', 'tray', 'send', 'mail'] },
+                { emoji: '📥', keywords: ['inbox', 'tray', 'receive', 'mail'] },
+                { emoji: '📦', keywords: ['package', 'box', 'parcel', 'delivery'] },
+                { emoji: '📫', keywords: ['closed', 'mailbox', 'with', 'raised', 'flag', 'mail'] },
+                { emoji: '📪', keywords: ['closed', 'mailbox', 'with', 'lowered', 'flag', 'mail'] },
+                { emoji: '📬', keywords: ['open', 'mailbox', 'with', 'raised', 'flag', 'mail'] },
+                { emoji: '📭', keywords: ['open', 'mailbox', 'with', 'lowered', 'flag', 'mail'] },
+                { emoji: '📮', keywords: ['postbox', 'mailbox', 'mail'] },
+                { emoji: '🗳️', keywords: ['ballot', 'box', 'with', 'ballot', 'vote', 'election'] },
+                { emoji: '✏️', keywords: ['pencil', 'write', 'edit'] },
+                { emoji: '✒️', keywords: ['black', 'nib', 'pen', 'write'] },
+                { emoji: '🖋️', keywords: ['fountain', 'pen', 'write'] },
+                { emoji: '🖊️', keywords: ['pen', 'write'] },
+                { emoji: '🖌️', keywords: ['paintbrush', 'art', 'paint'] },
+                { emoji: '🖍️', keywords: ['crayon', 'draw', 'color'] },
+                { emoji: '📝', keywords: ['memo', 'note', 'write', 'document'] },
+                { emoji: '💼', keywords: ['briefcase', 'business', 'work'] },
+                { emoji: '📁', keywords: ['file', 'folder', 'organize', 'documents'] },
+                { emoji: '📂', keywords: ['open', 'file', 'folder', 'documents'] },
+                { emoji: '🗂️', keywords: ['card', 'index', 'dividers', 'organize'] },
+                { emoji: '📅', keywords: ['calendar', 'date', 'schedule'] },
+                { emoji: '📆', keywords: ['tear-off', 'calendar', 'date'] },
+                { emoji: '🗒️', keywords: ['spiral', 'notepad', 'note', 'write'] },
+                { emoji: '🗓️', keywords: ['spiral', 'calendar', 'date'] },
+                { emoji: '📇', keywords: ['card', 'index', 'rolodex', 'contacts'] },
+                { emoji: '📈', keywords: ['chart', 'increasing', 'growth', 'stocks', 'up'] },
+                { emoji: '📉', keywords: ['chart', 'decreasing', 'decline', 'stocks', 'down'] },
+                { emoji: '📊', keywords: ['bar', 'chart', 'graph', 'statistics'] },
+                { emoji: '📋', keywords: ['clipboard', 'list', 'copy'] },
+                { emoji: '📌', keywords: ['pushpin', 'pin', 'attach'] },
+                { emoji: '📍', keywords: ['round', 'pushpin', 'location', 'pin'] },
+                { emoji: '📎', keywords: ['paperclip', 'attach'] },
+                { emoji: '🖇️', keywords: ['linked', 'paperclips', 'attach'] },
+                { emoji: '📏', keywords: ['straight', 'ruler', 'measure'] },
+                { emoji: '📐', keywords: ['triangular', 'ruler', 'measure', 'angle'] },
+                { emoji: '✂️', keywords: ['scissors', 'cut', 'tool'] },
+                { emoji: '🗃️', keywords: ['card', 'file', 'box', 'organize'] },
+                { emoji: '🗄️', keywords: ['file', 'cabinet', 'storage', 'organize'] },
+                { emoji: '🗑️', keywords: ['wastebasket', 'trash', 'delete', 'garbage'] },
+                { emoji: '🔒', keywords: ['locked', 'secure', 'private', 'password'] },
+                { emoji: '🔓', keywords: ['unlocked', 'open', 'access'] },
+                { emoji: '🔏', keywords: ['locked', 'with', 'pen', 'secure'] },
+                { emoji: '🔐', keywords: ['locked', 'with', 'key', 'secure'] },
+                { emoji: '🔑', keywords: ['key', 'unlock', 'password'] },
+                { emoji: '🗝️', keywords: ['old', 'key', 'unlock', 'antique'] },
+                { emoji: '🔨', keywords: ['hammer', 'tool', 'fix', 'build'] },
+                { emoji: '🪓', keywords: ['axe', 'tool', 'chop'] },
+                { emoji: '⛏️', keywords: ['pick', 'tool', 'mining'] },
+                { emoji: '⚒️', keywords: ['hammer', 'and', 'pick', 'tools'] },
+                { emoji: '🛠️', keywords: ['hammer', 'and', 'wrench', 'tools', 'fix'] },
+                { emoji: '🗡️', keywords: ['dagger', 'knife', 'weapon'] },
+                { emoji: '⚔️', keywords: ['crossed', 'swords', 'weapons', 'battle'] },
+                { emoji: '🔫', keywords: ['water', 'pistol', 'gun', 'toy'] },
+                { emoji: '🪃', keywords: ['boomerang', 'toy', 'weapon'] },
+                { emoji: '🏹', keywords: ['bow', 'and', 'arrow', 'archery', 'weapon'] },
+                { emoji: '🛡️', keywords: ['shield', 'protection', 'defense'] },
+                { emoji: '🪚', keywords: ['carpentry', 'saw', 'tool'] },
+                { emoji: '🔧', keywords: ['wrench', 'tool', 'fix'] },
+                { emoji: '🪛', keywords: ['screwdriver', 'tool', 'fix'] },
+                { emoji: '🔩', keywords: ['nut', 'and', 'bolt', 'tool', 'hardware'] },
+                { emoji: '⚙️', keywords: ['gear', 'cog', 'settings', 'mechanical'] },
+                { emoji: '🗜️', keywords: ['clamp', 'tool', 'compression'] },
+                { emoji: '⚖️', keywords: ['balance', 'scale', 'justice', 'law', 'weight'] },
+                { emoji: '🦯', keywords: ['white', 'cane', 'probing', 'accessibility'] },
+                { emoji: '🔗', keywords: ['link', 'chain', 'connection', 'url'] },
+                { emoji: '⛓️', keywords: ['chains', 'link', 'metal'] },
+                { emoji: '🪝', keywords: ['hook', 'catch', 'fish'] },
+                { emoji: '🧰', keywords: ['toolbox', 'tools', 'repair'] },
+                { emoji: '🧲', keywords: ['magnet', 'attraction', 'magnetic'] },
+                { emoji: '🪜', keywords: ['ladder', 'climb', 'step'] },
+                { emoji: '⚗️', keywords: ['alembic', 'chemistry', 'science'] },
+                { emoji: '🧪', keywords: ['test', 'tube', 'science', 'chemistry', 'experiment'] },
+                { emoji: '🧫', keywords: ['petri', 'dish', 'science', 'bacteria'] },
+                { emoji: '🧬', keywords: ['dna', 'genetics', 'science'] },
+                { emoji: '🔬', keywords: ['microscope', 'science', 'lab', 'research'] },
+                { emoji: '🔭', keywords: ['telescope', 'space', 'astronomy', 'stars'] },
+                { emoji: '📡', keywords: ['satellite', 'antenna', 'communication'] },
+                { emoji: '💉', keywords: ['syringe', 'injection', 'vaccine', 'medical'] },
+                { emoji: '🩸', keywords: ['drop', 'of', 'blood', 'donate', 'medical'] },
+                { emoji: '💊', keywords: ['pill', 'medicine', 'drug', 'medication'] },
+                { emoji: '🩹', keywords: ['adhesive', 'bandage', 'band-aid', 'injury'] },
+                { emoji: '🩼', keywords: ['crutch', 'injury', 'mobility'] },
+                { emoji: '🩺', keywords: ['stethoscope', 'doctor', 'medical', 'health'] },
+                { emoji: '🩻', keywords: ['x-ray', 'medical', 'bones'] },
+                { emoji: '🚪', keywords: ['door', 'enter', 'exit'] },
+                { emoji: '🛗', keywords: ['elevator', 'lift'] },
+                { emoji: '🪞', keywords: ['mirror', 'reflection'] },
+                { emoji: '🪟', keywords: ['window', 'view'] },
+                { emoji: '🛏️', keywords: ['bed', 'sleep', 'rest'] },
+                { emoji: '🛋️', keywords: ['couch', 'and', 'lamp', 'sofa', 'furniture'] },
+                { emoji: '🪑', keywords: ['chair', 'seat', 'furniture'] },
+                { emoji: '🚽', keywords: ['toilet', 'bathroom', 'restroom'] },
+                { emoji: '🪠', keywords: ['plunger', 'toilet', 'plumbing'] },
+                { emoji: '🚿', keywords: ['shower', 'bath', 'bathroom'] },
+                { emoji: '🛁', keywords: ['bathtub', 'bath', 'bathroom'] },
+                { emoji: '🪤', keywords: ['mouse', 'trap', 'catch'] },
+                { emoji: '🪒', keywords: ['razor', 'shave', 'grooming'] },
+                { emoji: '🧴', keywords: ['lotion', 'bottle', 'cream', 'soap'] },
+                { emoji: '🧷', keywords: ['safety', 'pin', 'attach'] },
+                { emoji: '🧹', keywords: ['broom', 'sweep', 'clean'] },
+                { emoji: '🧺', keywords: ['basket', 'laundry', 'picnic'] },
+                { emoji: '🧻', keywords: ['roll', 'of', 'paper', 'toilet', 'tissue'] },
+                { emoji: '🪣', keywords: ['bucket', 'pail', 'water'] },
+                { emoji: '🧼', keywords: ['soap', 'clean', 'wash'] },
+                { emoji: '🫧', keywords: ['bubbles', 'soap', 'clean'] },
+                { emoji: '🪥', keywords: ['toothbrush', 'dental', 'hygiene'] },
+                { emoji: '🧽', keywords: ['sponge', 'clean', 'wash'] },
+                { emoji: '🧯', keywords: ['fire', 'extinguisher', 'safety'] },
+                { emoji: '🛒', keywords: ['shopping', 'cart', 'trolley', 'grocery'] },
+            ],
+            symbols: [
+                { emoji: '❤️', keywords: ['red', 'heart', 'love', 'romance'] },
+                { emoji: '🧡', keywords: ['orange', 'heart', 'love'] },
+                { emoji: '💛', keywords: ['yellow', 'heart', 'love', 'friendship'] },
+                { emoji: '💚', keywords: ['green', 'heart', 'love', 'nature'] },
+                { emoji: '💙', keywords: ['blue', 'heart', 'love', 'trust'] },
+                { emoji: '💜', keywords: ['purple', 'heart', 'love'] },
+                { emoji: '🖤', keywords: ['black', 'heart', 'dark', 'love'] },
+                { emoji: '🤍', keywords: ['white', 'heart', 'pure', 'love'] },
+                { emoji: '🤎', keywords: ['brown', 'heart', 'love'] },
+                { emoji: '💔', keywords: ['broken', 'heart', 'heartbreak', 'sad'] },
+                { emoji: '❣️', keywords: ['heart', 'exclamation', 'love'] },
+                { emoji: '💕', keywords: ['two', 'hearts', 'love'] },
+                { emoji: '💞', keywords: ['revolving', 'hearts', 'love'] },
+                { emoji: '💓', keywords: ['beating', 'heart', 'love', 'pulse'] },
+                { emoji: '💗', keywords: ['growing', 'heart', 'love'] },
+                { emoji: '💖', keywords: ['sparkling', 'heart', 'love'] },
+                { emoji: '💘', keywords: ['heart', 'with', 'arrow', 'cupid', 'love'] },
+                { emoji: '💝', keywords: ['heart', 'with', 'ribbon', 'gift', 'love'] },
+                { emoji: '💟', keywords: ['heart', 'decoration', 'love'] },
+                { emoji: '☮️', keywords: ['peace', 'symbol', 'harmony'] },
+                { emoji: '✝️', keywords: ['latin', 'cross', 'christian', 'religion'] },
+                { emoji: '☪️', keywords: ['star', 'and', 'crescent', 'islam', 'muslim'] },
+                { emoji: '🕉️', keywords: ['om', 'hindu', 'buddhist', 'symbol'] },
+                { emoji: '☸️', keywords: ['wheel', 'of', 'dharma', 'buddhist', 'religion'] },
+                { emoji: '✡️', keywords: ['star', 'of', 'david', 'jewish', 'judaism'] },
+                { emoji: '🔯', keywords: ['dotted', 'six-pointed', 'star', 'fortune'] },
+                { emoji: '🕎', keywords: ['menorah', 'jewish', 'candelabrum'] },
+                { emoji: '☯️', keywords: ['yin', 'yang', 'balance', 'tao'] },
+                { emoji: '☦️', keywords: ['orthodox', 'cross', 'christian'] },
+                { emoji: '🛐', keywords: ['place', 'of', 'worship', 'religion', 'pray'] },
+                { emoji: '⛎', keywords: ['ophiuchus', 'zodiac', 'serpent'] },
+                { emoji: '♈', keywords: ['aries', 'zodiac', 'ram'] },
+                { emoji: '♉', keywords: ['taurus', 'zodiac', 'bull'] },
+                { emoji: '♊', keywords: ['gemini', 'zodiac', 'twins'] },
+                { emoji: '♋', keywords: ['cancer', 'zodiac', 'crab'] },
+                { emoji: '♌', keywords: ['leo', 'zodiac', 'lion'] },
+                { emoji: '♍', keywords: ['virgo', 'zodiac', 'maiden'] },
+                { emoji: '♎', keywords: ['libra', 'zodiac', 'scales'] },
+                { emoji: '♏', keywords: ['scorpio', 'zodiac', 'scorpion'] },
+                { emoji: '♐', keywords: ['sagittarius', 'zodiac', 'archer'] },
+                { emoji: '♑', keywords: ['capricorn', 'zodiac', 'goat'] },
+                { emoji: '♒', keywords: ['aquarius', 'zodiac', 'water', 'bearer'] },
+                { emoji: '♓', keywords: ['pisces', 'zodiac', 'fish'] },
+                { emoji: '🆔', keywords: ['id', 'button', 'identity'] },
+                { emoji: '⚛️', keywords: ['atom', 'symbol', 'science', 'physics'] },
+                { emoji: '🉑', keywords: ['japanese', 'acceptable', 'button'] },
+                { emoji: '☢️', keywords: ['radioactive', 'danger', 'radiation'] },
+                { emoji: '☣️', keywords: ['biohazard', 'danger', 'warning'] },
+                { emoji: '📴', keywords: ['mobile', 'phone', 'off', 'silent'] },
+                { emoji: '📳', keywords: ['vibration', 'mode', 'phone'] },
+                { emoji: '🈶', keywords: ['japanese', 'not', 'free', 'of', 'charge', 'button'] },
+                { emoji: '🈚', keywords: ['japanese', 'free', 'of', 'charge', 'button'] },
+                { emoji: '🈸', keywords: ['japanese', 'application', 'button'] },
+                { emoji: '🈺', keywords: ['japanese', 'open', 'for', 'business', 'button'] },
+                { emoji: '🈷️', keywords: ['japanese', 'monthly', 'amount', 'button'] },
+                { emoji: '✴️', keywords: ['eight-pointed', 'star', 'orange'] },
+                { emoji: '🆚', keywords: ['vs', 'button', 'versus'] },
+                { emoji: '💮', keywords: ['white', 'flower', 'japanese'] },
+                { emoji: '🉐', keywords: ['japanese', 'bargain', 'button'] },
+                { emoji: '㊙️', keywords: ['japanese', 'secret', 'button'] },
+                { emoji: '㊗️', keywords: ['japanese', 'congratulations', 'button'] },
+                { emoji: '🈴', keywords: ['japanese', 'passing', 'grade', 'button'] },
+                { emoji: '🈵', keywords: ['japanese', 'no', 'vacancy', 'button'] },
+                { emoji: '🈹', keywords: ['japanese', 'discount', 'button'] },
+                { emoji: '🈲', keywords: ['japanese', 'prohibited', 'button'] },
+                { emoji: '🅰️', keywords: ['a', 'button', 'blood', 'type'] },
+                { emoji: '🅱️', keywords: ['b', 'button', 'blood', 'type'] },
+                { emoji: '🆎', keywords: ['ab', 'button', 'blood', 'type'] },
+                { emoji: '🆑', keywords: ['cl', 'button', 'clear'] },
+                { emoji: '🅾️', keywords: ['o', 'button', 'blood', 'type'] },
+                { emoji: '🆘', keywords: ['sos', 'button', 'help', 'emergency'] },
+                { emoji: '❌', keywords: ['cross', 'mark', 'x', 'wrong', 'no'] },
+                { emoji: '⭕', keywords: ['hollow', 'red', 'circle', 'o', 'correct'] },
+                { emoji: '🛑', keywords: ['stop', 'sign', 'halt'] },
+                { emoji: '⛔', keywords: ['no', 'entry', 'prohibited'] },
+                { emoji: '📛', keywords: ['name', 'badge', 'tag'] },
+                { emoji: '🚫', keywords: ['prohibited', 'no', 'ban', 'forbidden'] },
+                { emoji: '💯', keywords: ['hundred', 'points', 'perfect', 'score', '100'] },
+                { emoji: '💢', keywords: ['anger', 'symbol', 'mad', 'comic'] },
+                { emoji: '♨️', keywords: ['hot', 'springs', 'onsen', 'steam'] },
+                { emoji: '🚷', keywords: ['no', 'pedestrians', 'prohibited'] },
+                { emoji: '🚯', keywords: ['no', 'littering', 'trash', 'prohibited'] },
+                { emoji: '🚳', keywords: ['no', 'bicycles', 'prohibited'] },
+                { emoji: '🚱', keywords: ['non-potable', 'water', 'do', 'not', 'drink'] },
+                { emoji: '🔞', keywords: ['no', 'one', 'under', 'eighteen', 'adult', 'content'] },
+                { emoji: '📵', keywords: ['no', 'mobile', 'phones', 'prohibited'] },
+                { emoji: '🚭', keywords: ['no', 'smoking', 'prohibited', 'cigarette'] },
+                { emoji: '❗', keywords: ['exclamation', 'mark', 'red', 'important', 'alert'] },
+                { emoji: '❕', keywords: ['white', 'exclamation', 'mark', 'alert'] },
+                { emoji: '❓', keywords: ['question', 'mark', 'red', 'confused'] },
+                { emoji: '❔', keywords: ['white', 'question', 'mark', 'confused'] },
+                { emoji: '‼️', keywords: ['double', 'exclamation', 'mark', 'alert'] },
+                { emoji: '⁉️', keywords: ['exclamation', 'question', 'mark', 'surprised'] },
+                { emoji: '🔅', keywords: ['dim', 'button', 'brightness', 'low'] },
+                { emoji: '🔆', keywords: ['bright', 'button', 'brightness', 'high'] },
+                { emoji: '〽️', keywords: ['part', 'alternation', 'mark', 'japanese'] },
+                { emoji: '⚠️', keywords: ['warning', 'caution', 'alert', 'danger'] },
+                { emoji: '🚸', keywords: ['children', 'crossing', 'school', 'kids'] },
+                { emoji: '🔱', keywords: ['trident', 'emblem', 'poseidon'] },
+                { emoji: '⚜️', keywords: ['fleur-de-lis', 'decorative'] },
+                { emoji: '🔰', keywords: ['japanese', 'symbol', 'for', 'beginner'] },
+                { emoji: '♻️', keywords: ['recycling', 'symbol', 'recycle', 'green', 'eco'] },
+                { emoji: '✅', keywords: ['check', 'mark', 'button', 'correct', 'yes', 'done'] },
+                { emoji: '🈯', keywords: ['japanese', 'reserved', 'button'] },
+                { emoji: '💹', keywords: ['chart', 'increasing', 'with', 'yen'] },
+                { emoji: '❇️', keywords: ['sparkle', 'star'] },
+                { emoji: '✳️', keywords: ['eight-spoked', 'asterisk'] },
+                { emoji: '❎', keywords: ['cross', 'mark', 'button', 'x'] },
+                { emoji: '🌐', keywords: ['globe', 'with', 'meridians', 'internet'] },
+                { emoji: '💠', keywords: ['diamond', 'with', 'a', 'dot', 'cute'] },
+                { emoji: 'Ⓜ️', keywords: ['circled', 'm', 'metro'] },
+                { emoji: '🌀', keywords: ['cyclone', 'spiral', 'hurricane', 'typhoon'] },
+                { emoji: '💤', keywords: ['zzz', 'sleep', 'tired', 'sleepy'] },
+                { emoji: '🏧', keywords: ['atm', 'sign', 'cash', 'money'] },
+                { emoji: '🚾', keywords: ['water', 'closet', 'wc', 'toilet', 'restroom'] },
+                { emoji: '♿', keywords: ['wheelchair', 'symbol', 'accessibility', 'disabled'] },
+                { emoji: '🅿️', keywords: ['p', 'button', 'parking'] },
+                { emoji: '🈳', keywords: ['japanese', 'vacancy', 'button'] },
+                { emoji: '🈂️', keywords: ['japanese', 'service', 'charge', 'button'] },
+                { emoji: '🛂', keywords: ['passport', 'control', 'travel'] },
+                { emoji: '🛃', keywords: ['customs', 'travel'] },
+                { emoji: '🛄', keywords: ['baggage', 'claim', 'luggage', 'travel'] },
+                { emoji: '🛅', keywords: ['left', 'luggage', 'baggage', 'storage'] },
+                { emoji: '🚹', keywords: ['men', 's', 'room', 'bathroom', 'male'] },
+                { emoji: '🚺', keywords: ['women', 's', 'room', 'bathroom', 'female'] },
+                { emoji: '🚼', keywords: ['baby', 'symbol', 'infant', 'changing'] },
+                { emoji: '🚻', keywords: ['restroom', 'bathroom', 'toilet', 'wc'] },
+                { emoji: '🚮', keywords: ['litter', 'in', 'bin', 'sign', 'trash'] },
+                { emoji: '🎦', keywords: ['cinema', 'movie', 'film', 'theater'] },
+                { emoji: '📶', keywords: ['antenna', 'bars', 'signal', 'reception', 'wifi'] },
+                { emoji: '🈁', keywords: ['japanese', 'here', 'button'] },
+                { emoji: '🔣', keywords: ['input', 'symbols', 'keyboard'] },
+                { emoji: 'ℹ️', keywords: ['information', 'info', 'help'] },
+                { emoji: '🔤', keywords: ['input', 'latin', 'letters', 'abc'] },
+                { emoji: '🔡', keywords: ['input', 'latin', 'lowercase', 'letters'] },
+                { emoji: '🔠', keywords: ['input', 'latin', 'uppercase', 'letters'] },
+                { emoji: '🆖', keywords: ['ng', 'button', 'no', 'good'] },
+                { emoji: '🆗', keywords: ['ok', 'button', 'okay'] },
+                { emoji: '🆙', keywords: ['up', 'button', 'arrow'] },
+                { emoji: '🆒', keywords: ['cool', 'button', 'awesome'] },
+                { emoji: '🆕', keywords: ['new', 'button', 'fresh'] },
+                { emoji: '🆓', keywords: ['free', 'button', 'gratis'] },
+                { emoji: '0️⃣', keywords: ['keycap', 'digit', 'zero', '0'] },
+                { emoji: '1️⃣', keywords: ['keycap', 'digit', 'one', '1'] },
+                { emoji: '2️⃣', keywords: ['keycap', 'digit', 'two', '2'] },
+                { emoji: '3️⃣', keywords: ['keycap', 'digit', 'three', '3'] },
+                { emoji: '4️⃣', keywords: ['keycap', 'digit', 'four', '4'] },
+                { emoji: '5️⃣', keywords: ['keycap', 'digit', 'five', '5'] },
+                { emoji: '6️⃣', keywords: ['keycap', 'digit', 'six', '6'] },
+                { emoji: '7️⃣', keywords: ['keycap', 'digit', 'seven', '7'] },
+                { emoji: '8️⃣', keywords: ['keycap', 'digit', 'eight', '8'] },
+                { emoji: '9️⃣', keywords: ['keycap', 'digit', 'nine', '9'] },
+                { emoji: '🔟', keywords: ['keycap', 'ten', '10'] },
+                { emoji: '🔢', keywords: ['input', 'numbers', '1234'] },
+                { emoji: '#️⃣', keywords: ['keycap', 'hash', 'pound', 'number'] },
+                { emoji: '*️⃣', keywords: ['keycap', 'asterisk', 'star'] },
+                { emoji: '⏏️', keywords: ['eject', 'button'] },
+                { emoji: '▶️', keywords: ['play', 'button', 'start', 'media'] },
+                { emoji: '⏸️', keywords: ['pause', 'button', 'stop', 'media'] },
+                { emoji: '⏯️', keywords: ['play', 'or', 'pause', 'button', 'media'] },
+                { emoji: '⏹️', keywords: ['stop', 'button', 'halt', 'media'] },
+                { emoji: '⏺️', keywords: ['record', 'button', 'capture'] },
+                { emoji: '⏭️', keywords: ['next', 'track', 'button', 'skip', 'forward'] },
+                { emoji: '⏮️', keywords: ['last', 'track', 'button', 'previous', 'back'] },
+                { emoji: '⏩', keywords: ['fast-forward', 'button', 'skip', 'media'] },
+                { emoji: '⏪', keywords: ['fast', 'reverse', 'button', 'rewind'] },
+                { emoji: '⏫', keywords: ['fast', 'up', 'button', 'double', 'arrow'] },
+                { emoji: '⏬', keywords: ['fast', 'down', 'button', 'double', 'arrow'] },
+                { emoji: '◀️', keywords: ['reverse', 'button', 'back', 'left', 'media'] },
+                { emoji: '🔼', keywords: ['upwards', 'button', 'arrow', 'up'] },
+                { emoji: '🔽', keywords: ['downwards', 'button', 'arrow', 'down'] },
+                { emoji: '➡️', keywords: ['right', 'arrow', 'forward', 'next'] },
+                { emoji: '⬅️', keywords: ['left', 'arrow', 'back', 'previous'] },
+                { emoji: '⬆️', keywords: ['up', 'arrow', 'upwards', 'top'] },
+                { emoji: '⬇️', keywords: ['down', 'arrow', 'downwards', 'bottom'] },
+                { emoji: '↗️', keywords: ['up-right', 'arrow', 'northeast'] },
+                { emoji: '↘️', keywords: ['down-right', 'arrow', 'southeast'] },
+                { emoji: '↙️', keywords: ['down-left', 'arrow', 'southwest'] },
+                { emoji: '↖️', keywords: ['up-left', 'arrow', 'northwest'] },
+                { emoji: '↕️', keywords: ['up-down', 'arrow', 'vertical'] },
+                { emoji: '↔️', keywords: ['left-right', 'arrow', 'horizontal'] },
+                { emoji: '↪️', keywords: ['left', 'arrow', 'curving', 'right'] },
+                { emoji: '↩️', keywords: ['right', 'arrow', 'curving', 'left', 'reply'] },
+                { emoji: '🔀', keywords: ['shuffle', 'tracks', 'button', 'random', 'music'] },
+                { emoji: '🔁', keywords: ['repeat', 'button', 'loop', 'music'] },
+                { emoji: '🔂', keywords: ['repeat', 'single', 'button', 'loop', 'one'] },
+                { emoji: '🔄', keywords: ['counterclockwise', 'arrows', 'button', 'refresh', 'reload'] },
+                { emoji: '🔃', keywords: ['clockwise', 'vertical', 'arrows', 'reload'] },
+                { emoji: '🎵', keywords: ['musical', 'note', 'music'] },
+                { emoji: '🎶', keywords: ['musical', 'notes', 'music', 'song'] },
+                { emoji: '➕', keywords: ['plus', 'sign', 'add', 'more', '+'] },
+                { emoji: '➖', keywords: ['minus', 'sign', 'subtract', 'less', '-'] },
+                { emoji: '➗', keywords: ['division', 'sign', 'divide', 'math'] },
+                { emoji: '✖️', keywords: ['multiplication', 'sign', 'multiply', 'times', 'x'] },
+                { emoji: '♾️', keywords: ['infinity', 'unlimited', 'forever'] },
+                { emoji: '💲', keywords: ['heavy', 'dollar', 'sign', 'money', 'currency'] },
+                { emoji: '💱', keywords: ['currency', 'exchange', 'money', 'forex'] },
+                { emoji: '™️', keywords: ['trade', 'mark', 'trademark', 'brand'] },
+                { emoji: '©️', keywords: ['copyright', 'rights', 'protected'] },
+                { emoji: '®️', keywords: ['registered', 'trademark', 'rights'] },
+                { emoji: '〰️', keywords: ['wavy', 'dash', 'line'] },
+                { emoji: '➰', keywords: ['curly', 'loop', 'curl'] },
+                { emoji: '➿', keywords: ['double', 'curly', 'loop'] },
+                { emoji: '🔚', keywords: ['end', 'arrow', 'finish'] },
+                { emoji: '🔙', keywords: ['back', 'arrow', 'return'] },
+                { emoji: '🔛', keywords: ['on', 'arrow', 'mark'] },
+                { emoji: '🔝', keywords: ['top', 'arrow', 'up'] },
+                { emoji: '🔜', keywords: ['soon', 'arrow', 'coming'] },
+                { emoji: '✔️', keywords: ['check', 'mark', 'correct', 'yes', 'tick'] },
+                { emoji: '☑️', keywords: ['check', 'box', 'with', 'check', 'done'] },
+                { emoji: '🔘', keywords: ['radio', 'button', 'circle'] },
+                { emoji: '🔴', keywords: ['red', 'circle', 'dot'] },
+                { emoji: '🟠', keywords: ['orange', 'circle', 'dot'] },
+                { emoji: '🟡', keywords: ['yellow', 'circle', 'dot'] },
+                { emoji: '🟢', keywords: ['green', 'circle', 'dot'] },
+                { emoji: '🔵', keywords: ['blue', 'circle', 'dot'] },
+                { emoji: '🟣', keywords: ['purple', 'circle', 'dot'] },
+                { emoji: '⚫', keywords: ['black', 'circle', 'dot'] },
+                { emoji: '⚪', keywords: ['white', 'circle', 'dot'] },
+                { emoji: '🟤', keywords: ['brown', 'circle', 'dot'] },
+                { emoji: '🔺', keywords: ['red', 'triangle', 'pointed', 'up'] },
+                { emoji: '🔻', keywords: ['red', 'triangle', 'pointed', 'down'] },
+                { emoji: '🔸', keywords: ['small', 'orange', 'diamond'] },
+                { emoji: '🔹', keywords: ['small', 'blue', 'diamond'] },
+                { emoji: '🔶', keywords: ['large', 'orange', 'diamond'] },
+                { emoji: '🔷', keywords: ['large', 'blue', 'diamond'] },
+                { emoji: '🔳', keywords: ['white', 'square', 'button'] },
+                { emoji: '🔲', keywords: ['black', 'square', 'button'] },
+                { emoji: '▪️', keywords: ['black', 'small', 'square'] },
+                { emoji: '▫️', keywords: ['white', 'small', 'square'] },
+                { emoji: '◾', keywords: ['black', 'medium-small', 'square'] },
+                { emoji: '◽', keywords: ['white', 'medium-small', 'square'] },
+                { emoji: '◼️', keywords: ['black', 'medium', 'square'] },
+                { emoji: '◻️', keywords: ['white', 'medium', 'square'] },
+                { emoji: '⬛', keywords: ['black', 'large', 'square'] },
+                { emoji: '⬜', keywords: ['white', 'large', 'square'] },
+                { emoji: '🟥', keywords: ['red', 'square'] },
+                { emoji: '🟧', keywords: ['orange', 'square'] },
+                { emoji: '🟨', keywords: ['yellow', 'square'] },
+                { emoji: '🟩', keywords: ['green', 'square'] },
+                { emoji: '🟦', keywords: ['blue', 'square'] },
+                { emoji: '🟪', keywords: ['purple', 'square'] },
+                { emoji: '🟫', keywords: ['brown', 'square'] },
+                { emoji: '⬜', keywords: ['white', 'large', 'square'] },
+                { emoji: '⬛', keywords: ['black', 'large', 'square'] },
+                { emoji: '◼️', keywords: ['black', 'medium', 'square'] },
+                { emoji: '◻️', keywords: ['white', 'medium', 'square'] },
+                { emoji: '◾', keywords: ['black', 'medium-small', 'square'] },
+                { emoji: '◽', keywords: ['white', 'medium-small', 'square'] },
+                { emoji: '▪️', keywords: ['black', 'small', 'square'] },
+                { emoji: '▫️', keywords: ['white', 'small', 'square'] },
+                { emoji: '🔈', keywords: ['speaker', 'low', 'volume'] },
+                { emoji: '🔇', keywords: ['muted', 'speaker', 'sound', 'off'] },
+                { emoji: '🔉', keywords: ['speaker', 'medium', 'volume'] },
+                { emoji: '🔊', keywords: ['speaker', 'high', 'volume', 'loud'] },
+                { emoji: '🔔', keywords: ['bell', 'notification', 'alert'] },
+                { emoji: '🔕', keywords: ['bell', 'with', 'slash', 'mute'] },
+                { emoji: '📣', keywords: ['megaphone', 'announcement'] },
+                { emoji: '📢', keywords: ['loudspeaker', 'announcement'] },
+                { emoji: '💬', keywords: ['speech', 'balloon', 'talk', 'message', 'chat'] },
+                { emoji: '💭', keywords: ['thought', 'balloon', 'think', 'dream'] },
+                { emoji: '🗯️', keywords: ['right', 'anger', 'bubble', 'angry', 'mad'] },
+                { emoji: '♠️', keywords: ['spade', 'suit', 'card'] },
+                { emoji: '♣️', keywords: ['club', 'suit', 'card'] },
+                { emoji: '♥️', keywords: ['heart', 'suit', 'card', 'love'] },
+                { emoji: '♦️', keywords: ['diamond', 'suit', 'card'] },
+                { emoji: '🃏', keywords: ['joker', 'card', 'wildcard'] },
+                { emoji: '🎴', keywords: ['flower', 'playing', 'cards'] },
+                { emoji: '🀄', keywords: ['mahjong', 'red', 'dragon'] },
+                { emoji: '🕐', keywords: ['one', 'oclock', '1', 'time'] },
+                { emoji: '🕑', keywords: ['two', 'oclock', '2', 'time'] },
+                { emoji: '🕒', keywords: ['three', 'oclock', '3', 'time'] },
+                { emoji: '🕓', keywords: ['four', 'oclock', '4', 'time'] },
+                { emoji: '🕔', keywords: ['five', 'oclock', '5', 'time'] },
+                { emoji: '🕕', keywords: ['six', 'oclock', '6', 'time'] },
+                { emoji: '🕖', keywords: ['seven', 'oclock', '7', 'time'] },
+                { emoji: '🕗', keywords: ['eight', 'oclock', '8', 'time'] },
+                { emoji: '🕘', keywords: ['nine', 'oclock', '9', 'time'] },
+                { emoji: '🕙', keywords: ['ten', 'oclock', '10', 'time'] },
+                { emoji: '🕚', keywords: ['eleven', 'oclock', '11', 'time'] },
+                { emoji: '🕛', keywords: ['twelve', 'oclock', '12', 'time'] },
+            ]
+        };
+        // Current active category
+        let currentEmojiCategory = 'smileys';
+        // Initialize emoji picker
+        function initializeEmojiPicker() {
+            loadEmojiCategory('smileys');
+        }
+        // Toggle emoji picker visibility
+        function toggleEmojiPicker() {
+            const picker = document.getElementById('emojiPicker');
+            const isActive = picker.classList.toggle('active');
+            if (isActive) {
+                // Focus on search input when opened
+                setTimeout(() => document.querySelector('.emoji-search').focus(), 100);
+            }
+        }
+        // Load emojis by category
+        function loadEmojiCategory(category) {
+            currentEmojiCategory = category;
+            const grid = document.getElementById('emojiGrid');
+            const emojis = emojiDatabase[category] || [];
+
+            grid.innerHTML = '';
+            emojis.forEach(item => {
+                const emojiEl = document.createElement('div');
+                emojiEl.className = 'emoji-item';
+                emojiEl.textContent = item.emoji;
+                emojiEl.title = item.keywords.join(', ');
+                emojiEl.addEventListener('pointerdown', (e) => {
+                    e.preventDefault();
+                    insertEmoji(item.emoji);
+                });
+                grid.appendChild(emojiEl);
+            });
+
+            // Update active category button
+            document.querySelectorAll('.emoji-category-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.category === category);
+            });
+        }
+
+        // Filter emojis by category
+        function filterEmojiCategory(category) {
+            loadEmojiCategory(category);
+            document.getElementById('emojiSuggestions').style.display = 'none';
+            document.querySelector('.emoji-search').value = '';
+        }
+
+        // Search emojis with NLP
+        function searchEmoji(query) {
+            const grid = document.getElementById('emojiGrid');
+            const suggestions = document.getElementById('emojiSuggestions');
+
+            if (!query.trim()) {
+                loadEmojiCategory(currentEmojiCategory);
+                suggestions.style.display = 'none';
+                return;
+            }
+
+            const searchTerm = query.toLowerCase().trim();
+            const results = [];
+
+            // Search through all categories
+            Object.values(emojiDatabase).forEach(category => {
+                category.forEach(item => {
+                    // Check if any keyword matches the search term
+                    const matches = item.keywords.some(keyword =>
+                        keyword.includes(searchTerm) || searchTerm.includes(keyword)
+                    );
+
+                    if (matches && !results.find(r => r.emoji === item.emoji)) {
+                        // Calculate relevance score
+                        const exactMatch = item.keywords.some(k => k === searchTerm);
+                        const startsWithMatch = item.keywords.some(k => k.startsWith(searchTerm));
+                        results.push({
+                            ...item,
+                            score: exactMatch ? 3 : startsWithMatch ? 2 : 1
+                        });
+                    }
+                });
+            });
+
+            // Sort by relevance
+            results.sort((a, b) => b.score - a.score);
+
+            // Display results
+            if (results.length > 0) {
+                // Show top 5 suggestions
+                suggestions.innerHTML = '';
+                suggestions.style.display = 'flex';
+                results.slice(0, 5).forEach(item => {
+                    const suggestionEl = document.createElement('span');
+                    suggestionEl.className = 'emoji-suggestion';
+                    suggestionEl.textContent = item.emoji;
+                    suggestionEl.title = item.keywords.join(', ');
+                    suggestionEl.addEventListener('pointerdown', (e) => {
+                        e.preventDefault();
+                        insertEmoji(item.emoji);
+                    });
+                    suggestions.appendChild(suggestionEl);
+                });
+
+                // Show all results in grid
+                grid.innerHTML = '';
+                results.forEach(item => {
+                    const emojiEl = document.createElement('div');
+                    emojiEl.className = 'emoji-item';
+                    emojiEl.textContent = item.emoji;
+                    emojiEl.title = item.keywords.join(', ');
+                    // ✅ Use consistent touch event
+                    emojiEl.addEventListener('pointerdown', (e) => {
+                        e.preventDefault();
+                        insertEmoji(item.emoji);
+                    });
+                    grid.appendChild(emojiEl);
+                });
+            } else {
+                suggestions.style.display = 'none';
+                grid.innerHTML = '<div style="padding: 20px; color: #888; text-align: center; grid-column: 1 / -1;">No emojis found</div>';
+            }
+        }
+
+        // Insert emoji into message input
+        function insertEmoji(emoji) {
+            const input = document.getElementById('messageInput');
+            const cursorPos = input.selectionStart;
+            const textBefore = input.value.substring(0, cursorPos);
+            const textAfter = input.value.substring(cursorPos);
+
+            input.value = textBefore + emoji + textAfter;
+
+            // Set cursor position after emoji
+            const newPos = cursorPos + emoji.length;
+            input.setSelectionRange(newPos, newPos);
+            input.focus();
+
+            // ✅ NEW: Update button visibility after emoji
+            updateSendButtonVisibility();
+
+            // Close picker
+            document.getElementById('emojiPicker').classList.remove('active');
+        }
+
+        async function testTURN() {
+            console.log('🧪 Testing TURN servers...');
+
+            const pc = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    {
+                        urls: 'turn:openrelay.metered.ca:443',
+                        username: 'openrelayproject',
+                        credential: 'openrelayproject'
+                    }
+                ]
+            });
+
+            let relayFound = false;
+
+            pc.onicecandidate = (e) => {
+                if (e.candidate) {
+                    console.log('🧊', e.candidate.type, e.candidate.address);
+                    if (e.candidate.type === 'relay') {
+                        relayFound = true;
+                        console.log('✅ TURN RELAY WORKS!');
+                    }
+                } else {
+                    console.log(relayFound ? '✅ Test PASSED' : '❌ Test FAILED - No relay');
+                }
+            };
+
+            pc.createDataChannel('test');
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            setTimeout(() => pc.close(), 5000);
+        }
+
+        testTURN();
+
+        // ========== Cleanup on page unload ==========
+
+        window.addEventListener('beforeunload', () => {
+            if (ws) ws.close();
+            if (localStream) localStream.getTracks().forEach(track => track.stop());
+            if (peerConnection) peerConnection.close();
+        });
+
+        console.log('🚀 DecentralChat Frontend Loaded');
+
+        // Helper: Format file size
+        function formatFileSize(bytes) {
+            if (!bytes || bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
+        }
+
+        // Helper: Escape HTML
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Initialize global variables
+        window.allMediaFiles = [];
+        window.searchableMessages = [];
+
+        // Mobile sidebar toggle
+        function toggleSidebarMobile() {
+            const sidebar = document.getElementById('sidebar');
+            const backdrop = document.createElement('div');
+            backdrop.className = 'sidebar-backdrop';
+            backdrop.id = 'sidebarBackdrop';
+
+            if (sidebar.classList.contains('show')) {
+                sidebar.classList.remove('show');
+                document.getElementById('sidebarBackdrop')?.remove();
+            } else {
+                sidebar.classList.add('show');
+                document.body.appendChild(backdrop);
+                backdrop.classList.add('show');
+
+                backdrop.onclick = () => {
+                    sidebar.classList.remove('show');
+                    backdrop.remove();
+                };
+            }
+        }
+
+        // Mobile file input fix
+        function setupMobileFileInputs() {
+            const imageInput = document.getElementById('imageInput');
+            const fileInput = document.getElementById('fileInput');
+
+            if (!imageInput || !fileInput) return;
+
+            // iOS Safari: remove capture so users can choose gallery vs camera
+            if (/iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+                imageInput.removeAttribute('capture');
+                imageInput.setAttribute('accept', 'image/*,video/*');
+                console.log('🍎 iOS: removed capture to allow gallery selection');
+            }
+
+            // Android: Remove capture to allow both camera and gallery selection
+            if (/Android/i.test(navigator.userAgent)) {
+                imageInput.removeAttribute('capture');  // Don't force camera
+                imageInput.setAttribute('accept', 'image/*,video/*');
+                console.log('🤖 Android: removed capture to allow gallery selection');
+            }
+
+            console.log('✅ Mobile file inputs configured');
+        }
+
+
+        // Prevent zoom on double-tap (mobile) - FIXED: exclude file inputs
+        let lastTouchEnd = 0;
+        document.addEventListener('touchend', (e) => {
+            // ✅ CRITICAL: Don't prevent default on file inputs or their labels
+            // This was blocking mobile file selection from working
+            if (e.target.tagName === 'INPUT' && e.target.type === 'file') return;
+            if (e.target.closest('label.file-btn, label.image-btn, .input-actions')) return;
+            if (e.target.closest('input[type="file"]')) return;
+
+            const now = Date.now();
+            if (now - lastTouchEnd <= 300) {
+                e.preventDefault();
+            }
+            lastTouchEnd = now;
+        }, false);
+
+        // Prevent iOS elastic scrolling on body
+        document.body.addEventListener('touchmove', (e) => {
+            if (e.target === document.body) {
+                e.preventDefault();
+            }
+        }, { passive: false });
+
+        // Mobile-friendly emoji picker positioning
+        function adjustEmojiPickerPosition() {
+            const picker = document.getElementById('emojiPicker');
+            const inputContainer = document.querySelector('.message-input-container');
+
+            if (window.innerWidth <= 768) {
+                const rect = inputContainer.getBoundingClientRect();
+                picker.style.bottom = (window.innerHeight - rect.top) + 'px';
+            }
+        }
+
+        // Call on emoji picker open
+        document.getElementById('emojiBtn').addEventListener('click', adjustEmojiPickerPosition);
+
+        // Keyboard event handling for mobile
+        let keyboardHeight = 0;
+        window.addEventListener('resize', () => {
+            if (window.innerWidth <= 768) {
+                const newHeight = window.innerHeight;
+                const oldHeight = document.documentElement.clientHeight;
+
+                if (newHeight < oldHeight) {
+                    // Keyboard opened
+                    keyboardHeight = oldHeight - newHeight;
+                    document.querySelector('.messages-container').style.paddingBottom = (keyboardHeight + 80) + 'px';
+                } else {
+                    // Keyboard closed
+                    keyboardHeight = 0;
+                    document.querySelector('.messages-container').style.paddingBottom = '80px';
+                }
+            }
+        });
+
+        // Prevent body scroll when modal is open (mobile)
+        function preventBodyScroll(modalId) {
+            const modal = document.getElementById(modalId);
+            if (modal.classList.contains('active')) {
+                document.body.style.overflow = 'hidden';
+                document.body.style.position = 'fixed';
+                document.body.style.width = '100%';
+            } else {
+                document.body.style.overflow = '';
+                document.body.style.position = '';
+                document.body.style.width = '';
+            }
+        }
+
+        // Update closeModal function
+        const originalCloseModal = closeModal;
+        closeModal = function (modalId) {
+            originalCloseModal(modalId);
+            if (window.innerWidth <= 768) {
+                preventBodyScroll(modalId);
+            }
+        };
+
+        // Mobile touch feedback
+        document.addEventListener('touchstart', (e) => {
+            if (e.target.classList.contains('icon-btn') ||
+                e.target.classList.contains('action-btn') ||
+                e.target.classList.contains('contact-item')) {
+                e.target.style.opacity = '0.7';
+            }
+        });
+
+        document.addEventListener('touchend', (e) => {
+            if (e.target.classList.contains('icon-btn') ||
+                e.target.classList.contains('action-btn') ||
+                e.target.classList.contains('contact-item')) {
+                setTimeout(() => {
+                    e.target.style.opacity = '1';
+                }, 100);
+            }
+        });
+
+        // Initialize mobile features
+        document.addEventListener('DOMContentLoaded', () => {
+            setupMobileFileInputs();
+
+            // Auto-close sidebar when selecting chat on mobile
+            if (window.innerWidth <= 768) {
+                document.querySelectorAll('.contact-item').forEach(item => {
+                    item.addEventListener('click', () => {
+                        setTimeout(() => {
+                            document.getElementById('sidebar').classList.remove('show');
+                            document.getElementById('sidebarBackdrop')?.remove();
+                        }, 100);
+                    });
+                });
+            }
+        });
+
+        // Mobile orientation change handler
+        window.addEventListener('orientationchange', () => {
+            setTimeout(() => {
+                adjustEmojiPickerPosition();
+
+                // Recalculate message container height
+                const inputHeight = document.querySelector('.message-input-container').offsetHeight;
+                document.querySelector('.messages-container').style.paddingBottom = (inputHeight + 20) + 'px';
+            }, 300);
+        });
+
+        // Smooth scroll to bottom on mobile
+        function scrollToBottomMobile() {
+            if (window.innerWidth <= 768) {
+                const container = document.getElementById('messagesContainer');
+                container.scrollTo({
+                    top: container.scrollHeight,
+                    behavior: 'smooth'
+                });
+            }
+        }
+
+        // Lazy load images in messages
+        function setupLazyLoading() {
+            // Modern: IntersectionObserver for chat images (thumbnail already loaded, swap to full on visibility)
+            if (!window._imgObserver) {
+                window._imgObserver = new IntersectionObserver((entries) => {
+                    entries.forEach(entry => {
+                        if (entry.isIntersecting) {
+                            const img = entry.target;
+                            const fullSrc = img.dataset.full;
+                            if (fullSrc && fullSrc !== img.src) {
+                                // Only load full image when user scrolls to it AND image is reasonably sized
+                                // For thumbnails this is a no-op since thumbnail === fullSrc when no thumb
+                                img.style.filter = 'blur(2px)';
+                                const fullImg = new Image();
+                                fullImg.onload = () => {
+                                    img.src = fullSrc;
+                                    img.style.filter = 'blur(0)';
+                                };
+                                fullImg.src = fullSrc;
+                            }
+                            window._imgObserver.unobserve(img);
+                        }
+                    });
+                }, { rootMargin: '100px' });
+            }
+
+            document.querySelectorAll('img.chat-thumb-img').forEach(img => {
+                window._imgObserver.observe(img);
+            });
+        }
+
+        // Throttle scroll events on mobile
+        function throttle(func, wait) {
+            let timeout;
+            return function () {
+                if (!timeout) {
+                    timeout = setTimeout(() => {
+                        func.apply(this, arguments);
+                        timeout = null;
+                    }, wait);
+                }
+            };
+        }
+
+        // Apply to scroll handlers
+        const messagesContainer = document.getElementById('messagesContainer');
+        if (messagesContainer && window.innerWidth <= 768) {
+            messagesContainer.addEventListener('scroll', throttle(() => {
+                // Your scroll logic here
+            }, 200));
+        }
+
+        // Reduce animation on low-end mobile
+        if (window.innerWidth <= 768 && navigator.hardwareConcurrency <= 4) {
+            document.documentElement.style.setProperty('--animation-duration', '0.2s');
+        }
+        // Swipe to close sidebar
+        let touchStartX = 0;
+        let touchEndX = 0;
+
+        document.getElementById('sidebar').addEventListener('touchstart', (e) => {
+            touchStartX = e.changedTouches[0].screenX;
+        });
+
+        document.getElementById('sidebar').addEventListener('touchend', (e) => {
+            touchEndX = e.changedTouches[0].screenX;
+            handleSwipe();
+
+        });
+
+        function handleSwipe() {
+            if (touchEndX < touchStartX - 50) {
+                // Swipe left - close sidebar
+                document.getElementById('sidebar').classList.remove('show');
+                document.getElementById('sidebarBackdrop')?.remove();
+            }
+        }
+
+        // Swipe right on chat to open sidebar
+        let chatTouchStartX = 0;
+
+        document.getElementById('activeChat').addEventListener('touchstart', (e) => {
+            chatTouchStartX = e.changedTouches[0].screenX;
+        });
+
+        document.getElementById('activeChat').addEventListener('touchend', (e) => {
+            const touchEndX = e.changedTouches[0].screenX;
+            if (touchEndX > chatTouchStartX + 50 && chatTouchStartX < 50) {
+                // Swipe right from edge - open sidebar
+                toggleSidebarMobile();
+            }
+        });
+
+        // ==================== RESPONSIVE JAVASCRIPT ====================
+
+        // Initialize responsive features
+        function initResponsive() {
+            handleViewportResize();
+            setupTouchGestures();
+            setupKeyboardHandling();
+            setupOrientationChange();
+            preventMobileZoom();
+        }
+
+        // Handle viewport resize
+        let resizeTimeout;
+        function handleViewportResize() {
+            window.addEventListener('resize', () => {
+                clearTimeout(resizeTimeout);
+                resizeTimeout = setTimeout(() => {
+                    adjustLayoutForScreen();
+                }, 250);
+            });
+        }
+
+        // Adjust layout based on screen size
+        function adjustLayoutForScreen() {
+            const isMobile = window.innerWidth <= 768;
+            const isTablet = window.innerWidth > 768 && window.innerWidth <= 1024;
+
+            // Adjust message input height
+            if (isMobile) {
+                const inputContainer = document.querySelector('.message-input-container');
+                if (inputContainer) {
+                    document.querySelector('.messages-container').style.paddingBottom =
+                        (inputContainer.offsetHeight + 20) + 'px';
+                }
+            }
+
+            // Adjust emoji picker position
+            if (isMobile && document.getElementById('emojiPicker').classList.contains('active')) {
+                adjustEmojiPickerPosition();
+            }
+
+            // Update sidebar behavior
+            const sidebar = document.getElementById('sidebar');
+            if (isMobile) {
+                sidebar.classList.remove('collapsed');
+            }
+        }
+
+        // Touch gesture support
+        function setupTouchGestures() {
+            // Swipe to close sidebar
+            let touchStartX = 0;
+            let touchEndX = 0;
+
+            const sidebar = document.getElementById('sidebar');
+            sidebar.addEventListener('touchstart', (e) => {
+                touchStartX = e.changedTouches[0].screenX;
+            }, { passive: true });
+
+            sidebar.addEventListener('touchend', (e) => {
+                touchEndX = e.changedTouches[0].screenX;
+                if (touchEndX < touchStartX - 70) {
+                    closeSidebarMobile();
+                }
+            }, { passive: true });
+
+            // Swipe from left edge to open sidebar
+            const chatArea = document.getElementById('activeChat');
+            let chatTouchStartX = 0;
+
+            chatArea.addEventListener('touchstart', (e) => {
+                chatTouchStartX = e.changedTouches[0].screenX;
+            }, { passive: true });
+
+            chatArea.addEventListener('touchend', (e) => {
+                const touchEndX = e.changedTouches[0].screenX;
+                if (window.innerWidth <= 768 &&
+                    chatTouchStartX < 30 &&
+                    touchEndX > chatTouchStartX + 70) {
+                    openSidebarMobile();
+                }
+            }, { passive: true });
+        }
+
+        // Mobile sidebar controls
+        function openSidebarMobile() {
+            if (window.innerWidth > 768) return;
+
+            const sidebar = document.getElementById('sidebar');
+            let backdrop = document.getElementById('sidebarBackdrop');
+
+            if (!backdrop) {
+                backdrop = document.createElement('div');
+                backdrop.id = 'sidebarBackdrop';
+                backdrop.className = 'sidebar-backdrop';
+                backdrop.onclick = closeSidebarMobile;
+                document.body.appendChild(backdrop);
+            }
+
+            sidebar.classList.add('show');
+            backdrop.classList.add('show');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeSidebarMobile() {
+            const sidebar = document.getElementById('sidebar');
+            const backdrop = document.getElementById('sidebarBackdrop');
+
+            sidebar.classList.remove('show');
+            if (backdrop) {
+                backdrop.classList.remove('show');
+                setTimeout(() => backdrop.remove(), 300);
+            }
+            document.body.style.overflow = '';
+        }
+
+        // Update toggleSidebar to handle mobile
+        const originalToggleSidebar = typeof window.toggleSidebar !== 'undefined' ? window.toggleSidebar : function () { };
+        toggleSidebar = function () {
+            if (window.innerWidth <= 768) {
+                if (document.getElementById('sidebar').classList.contains('show')) {
+                    closeSidebarMobile();
+                } else {
+                    openSidebarMobile();
+                }
+            } else {
+                originalToggleSidebar();
+            }
+        };
+
+        // Keyboard handling for mobile
+        function setupKeyboardHandling() {
+            if (window.innerWidth > 768) return;
+
+            const messageInput = document.getElementById('messageInput');
+            let originalHeight = window.innerHeight;
+
+            window.addEventListener('resize', () => {
+                if (window.innerWidth > 768) return;
+
+                const currentHeight = window.innerHeight;
+                const diff = originalHeight - currentHeight;
+
+                if (diff > 150) {
+                    // Keyboard opened
+                    document.querySelector('.messages-container').style.paddingBottom =
+                        (diff + 20) + 'px';
+                    setTimeout(() => {
+                        messageInput.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    }, 100);
+                } else {
+                    // Keyboard closed
+                    document.querySelector('.messages-container').style.paddingBottom = '90px';
+                }
+            });
+        }
+
+        // Orientation change handling
+        function setupOrientationChange() {
+            window.addEventListener('orientationchange', () => {
+                setTimeout(() => {
+                    adjustLayoutForScreen();
+                    if (document.getElementById('emojiPicker').classList.contains('active')) {
+                        adjustEmojiPickerPosition();
+                    }
+                }, 300);
+            });
+        }
+
+        // Adjust emoji picker for mobile
+        function adjustEmojiPickerPosition() {
+            if (window.innerWidth > 768) return;
+
+            const picker = document.getElementById('emojiPicker');
+            const inputContainer = document.querySelector('.message-input-container');
+
+            if (inputContainer) {
+                const rect = inputContainer.getBoundingClientRect();
+                picker.style.bottom = '0';
+                picker.style.maxHeight = '60vh';
+            }
+        }
+
+        // Prevent double-tap zoom - FIXED: exclude file inputs
+        function preventMobileZoom() {
+            // Note: Main double-tap prevention is already set up above
+            // This function now only handles pinch zoom
+
+            // Prevent pinch zoom
+            document.addEventListener('gesturestart', (e) => {
+                e.preventDefault();
+            });
+        }
+
+        // Update selectChat to close sidebar on mobile
+        const originalSelectChat = typeof window.selectChat !== 'undefined' ? window.selectChat : function () { };
+        selectChat = async function (chat) {
+            await originalSelectChat(chat);
+
+            // Force WhatsApp layout: sidebar always closes on mobile
+            if (window.innerWidth <= 900) {
+                closeSidebarMobile();
+            }
+        };
+
+        // ✅ MOBILE DEBUG: Handled in main DOMContentLoaded block
+        // Duplicate handlers removed to prevent double-firing
+
+        // Smooth scroll to bottom on mobile
+        function scrollToBottomSmooth() {
+            if (window.innerWidth <= 768) {
+                const container = document.getElementById('messagesContainer');
+                if (container) {
+                    container.scrollTo({
+                        top: container.scrollHeight,
+                        behavior: 'smooth'
+                    });
+                }
+            }
+        }
+
+        // Call after sending message
+        const originalSendMessage = typeof window.sendMessage !== 'undefined' ? window.sendMessage : function () { };
+        sendMessage = async function () {
+            await originalSendMessage();
+            setTimeout(scrollToBottomSmooth, 100);
+        };
+
+        console.log('✅ Responsive features initialized');
+        // ========== DOWNLOAD BUTTON FEATURE (ADD-ON) ==========
+
+        // Download file function
+        async function downloadFile(url, filename) {
+            console.log('📥 Downloading:', filename, 'from', url);
+
+            try {
+                showNotification('Downloading', `Downloading ${filename}...`);
+
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const blob = await response.blob();
+                const downloadUrl = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = downloadUrl;
+                a.download = filename;
+
+                document.body.appendChild(a);
+                a.click();
+
+                setTimeout(() => {
+                    window.URL.revokeObjectURL(downloadUrl);
+                    document.body.removeChild(a);
+                }, 100);
+
+                console.log('✅ Download started:', filename);
+                showNotification('Success', `Download started: ${filename}`);
+
+            } catch (error) {
+                console.error('❌ Download failed:', error);
+                showError(`Download failed: ${error.message}`);
+            }
+        }
+        function hideConversionPanel() {
+            const panel = document.getElementById('conversionPanel');
+            if (panel) {
+                panel.style.display = 'none';
+            }
+            window.currentFileForConversion = null;
+            document.getElementById('sendBtn').disabled = false;
+        }
+        // Add download buttons to existing media after page loads
+        function addDownloadButtonsToMedia() {
+            console.log('📥 Adding download buttons to existing media...');
+
+            // Add buttons to images
+            document.querySelectorAll('.message-attachment img').forEach(img => {
+                // Skip if button already exists
+                if (img.parentElement.querySelector('.media-download-btn')) return;
+
+                const imageUrl = img.src;
+                const filename = img.alt || 'image.jpg';
+
+                // Make parent relative positioned
+                img.parentElement.style.position = 'relative';
+
+                const downloadBtn = document.createElement('button');
+                downloadBtn.className = 'media-download-btn';
+                downloadBtn.innerHTML = '📥';
+                downloadBtn.title = 'Download image';
+                downloadBtn.style.cssText = `
+                    position: absolute;
+                    bottom: 8px;
+                    right: 8px;
+                    background: rgba(0,0,0,0.7);
+                    border: 1px solid rgba(255,255,255,0.3);
+                    color: #fff;
+                    padding: 8px 12px;
+                    border-radius: 50%;
+                    cursor: pointer;
+                    font-size: 16px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    transition: all 0.2s;
+                    backdrop-filter: blur(10px);
+                    z-index: 10;
+                    width: 36px;
+                    height: 36px;
+                `;
+
+                downloadBtn.onmouseover = function () {
+                    this.style.background = 'rgba(218,165,32,0.9)';
+                    this.style.borderColor = 'rgba(218,165,32,1)';
+                    this.style.transform = 'scale(1.1)';
+                };
+
+                downloadBtn.onmouseout = function () {
+                    this.style.background = 'rgba(0,0,0,0.7)';
+                    this.style.borderColor = 'rgba(255,255,255,0.3)';
+                    this.style.transform = 'scale(1)';
+                };
+
+                downloadBtn.onclick = function (e) {
+                    e.stopPropagation();
+                    downloadFile(imageUrl, filename);
+                };
+
+                img.parentElement.appendChild(downloadBtn);
+            });
+
+            // Add buttons to videos
+            document.querySelectorAll('.message-attachment video').forEach(video => {
+                // Skip if button already exists
+                if (video.parentElement.querySelector('.media-download-btn')) return;
+
+                const videoUrl = video.src;
+                const filename = 'video.mp4';
+
+                // Make parent relative positioned
+                video.parentElement.style.position = 'relative';
+
+                const downloadBtn = document.createElement('button');
+                downloadBtn.className = 'media-download-btn';
+                downloadBtn.innerHTML = '📥';
+                downloadBtn.title = 'Download video';
+                downloadBtn.style.cssText = `
+                    position: absolute;
+                    bottom: 8px;
+                    right: 8px;
+                    background: rgba(0,0,0,0.7);
+                    border: 1px solid rgba(255,255,255,0.3);
+                    color: #fff;
+                    padding: 8px 12px;
+                    border-radius: 50%;
+                    cursor: pointer;
+                    font-size: 16px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    transition: all 0.2s;
+                    backdrop-filter: blur(10px);
+                    z-index: 10;
+                    width: 36px;
+                    height: 36px;
+                `;
+
+                downloadBtn.onmouseover = function () {
+                    this.style.background = 'rgba(218,165,32,0.9)';
+                    this.style.borderColor = 'rgba(218,165,32,1)';
+                    this.style.transform = 'scale(1.1)';
+                };
+
+                downloadBtn.onmouseout = function () {
+                    this.style.background = 'rgba(0,0,0,0.7)';
+                    this.style.borderColor = 'rgba(255,255,255,0.3)';
+                    this.style.transform = 'scale(1)';
+                };
+
+                downloadBtn.onclick = function (e) {
+                    e.stopPropagation();
+                    downloadFile(videoUrl, filename);
+                };
+
+                video.parentElement.appendChild(downloadBtn);
+            });
+
+            console.log('✅ Download buttons added to existing media');
+        }
+
+        // Auto-add buttons when new messages arrive
+        const originalHandleNewMessage = handleNewMessage;
+        handleNewMessage = function (data) {
+            originalHandleNewMessage(data);
+
+            // Wait for DOM to update, then add buttons
+            setTimeout(() => {
+                addDownloadButtonsToMedia();
+            }, 100);
+        };
+
+        // Auto-add buttons when loading messages
+        const originalRenderMessages = renderMessages;
+        renderMessages = function (messages) {
+            originalRenderMessages(messages);
+
+            // Wait for DOM to update, then add buttons and setup lazy loading
+            setTimeout(() => {
+                addDownloadButtonsToMedia();
+                setupLazyLoading();
+            }, 100);
+        };
+
+        // Add buttons to existing messages on page load
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                addDownloadButtonsToMedia();
+            }, 1000);
+        });
+
+        // Re-add buttons when selecting a chat
+        (function () {
+            const originalSelectChat = selectChat;
+            selectChat = async function (chat) {
+                await originalSelectChat(chat);
+
+                // Wait for messages to load, then add buttons
+                setTimeout(() => {
+                    addDownloadButtonsToMedia();
+                }, 500);
+            };
+        })();
+
+        console.log('✅ Download button feature loaded');
+    
+        // ===== TOAST NOTIFICATION SYSTEM =====
+        // Always visible on all screens - independent of login state and notification permissions
+        function showToast(message, type) {
+            if (!message) return;
+            const container = document.getElementById('toastContainer');
+            if (!container) return;
+            
+            const toast = document.createElement('div');
+            const icon = type === 'error' ? '❌' : type === 'success' ? '✅' : 'ℹ️';
+            const bgColor = type === 'error' 
+                ? 'linear-gradient(135deg, rgba(229, 72, 77,0.95), rgba(200,50,50,0.95))' 
+                : type === 'success' 
+                    ? 'linear-gradient(135deg, rgba(76, 175, 125,0.95), rgba(74, 124, 89,0.95))'
+                    : 'linear-gradient(135deg, rgba(96,165,250,0.95), rgba(37,99,235,0.95))';
+            
+            toast.style.cssText = `pointer-events:auto;padding:12px 20px;border-radius:12px;background:${bgColor};backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.15);box-shadow:0 8px 32px rgba(0,0,0,0.5);color:#fff;font-size:14px;font-weight:600;display:flex;align-items:center;gap:10px;min-width:200px;max-width:400px;text-align:left;animation:toastSlideIn 0.35s cubic-bezier(0.16,1,0.3,1);word-break:break-word;line-height:1.4;`;
+            toast.innerHTML = `<span style="font-size:16px;flex-shrink:0;">${icon}</span><span>${escapeHtml(message)}</span>`;
+            
+            container.appendChild(toast);
+            
+            // Remove after 4s (6s for errors)
+            setTimeout(() => {
+                toast.style.transition = 'all 0.3s ease-out';
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateY(20px) scale(0.95)';
+                setTimeout(() => { if (toast.parentElement) toast.remove(); }, 300);
+            }, type === 'error' ? 6000 : 4000);
+        }
+        
+        // Add toast CSS animation if not present
+        if (!document.getElementById('toast-anim-style')) {
+            const style = document.createElement('style');
+            style.id = 'toast-anim-style';
+            style.textContent = `@keyframes toastSlideIn {from{opacity:0;transform:translateY(30px) scale(0.9);}to{opacity:1;transform:translateY(0) scale(1);}}`;
+            document.head.appendChild(style);
+        }
+        
+

@@ -122,7 +122,7 @@ def main():
     
     # Import server class
     try:
-        from server import DecentralChatServer
+        from app.server import DecentralChatServer
         server = DecentralChatServer()
         print("✅ Server class loaded successfully\\n")
     except Exception as e:

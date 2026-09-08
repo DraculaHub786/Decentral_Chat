@@ -260,7 +260,14 @@ The server supports **100+ format conversions**:
 ```
 Decentral_Chat/
 ├── backend/
-│   ├── server.py                    # Main aiohttp server
+│   ├── server.py                    # Compatibility shim → app/ package
+│   ├── run.py                       # Entrypoint: python run.py
+│   ├── app/                         # Modular backend package
+│   │   ├── main.py                  # App entrypoint / runner
+│   │   ├── server.py                # DecentralChatServer orchestrator
+│   │   ├── globals.py               # Shared state namespace (g.*)
+│   │   ├── core/                    # config, security, redis, firebase, middleware
+│   │   ├── auth/ users/ contacts/ chats/ messages/ files/ calls/ ws/ admin/ static/ sync/
 │   ├── requirements.txt             # Python dependencies
 │   ├── requirements-converter.txt   # Conversion-specific deps
 │   ├── CONVERSION_SETUP.md          # Detailed conversion guide

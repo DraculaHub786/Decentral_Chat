@@ -1,0 +1,270 @@
+    1:                 const fileId = uploadData.file.id;
+    2: 
+    3:                 // 2️⃣ Convert file
+    4:                 const convertResponse = await fetch(`${API_URL}/files/convert`, {
+    5:                     method: 'POST',
+    6:                     headers: {
+    7:                         'Authorization': `Bearer ${authToken}`,
+    8:                         'Content-Type': 'application/json'
+    9:                     },
+   10:                     body: JSON.stringify({
+   11:                         file_id: fileId,
+   12:                         target_format: targetFormat
+   13:                     })
+   14:                 });
+   15: 
+   16:                 clearInterval(progressInterval);
+   17: 
+   18:                 if (!convertResponse.ok) {
+   19:                     const err = await convertResponse.json();
+   20:                     throw new Error(err.error || 'Conversion failed');
+   21:                 }
+   22: 
+   23:                 const convertData = await convertResponse.json();
+   24: 
+   25:                 // 3️⃣ Use server-converted file directly (no re-upload)
+   26:                 let downloadUrl = convertData.converted_file.url;
+   27:                 if (!downloadUrl.startsWith('http')) {
+   28:                     downloadUrl = downloadUrl.startsWith('/api')
+   29:                         ? downloadUrl
+   30:                         : `/api${downloadUrl}`;
+   31:                 }
+   32: 
+   33:                 // Store a reference object that points to server-converted file
+   34:                 const convertedRef = {
+   35:                     __converted: true,
+   36:                     serverId: convertData.converted_file.id,
+   37:                     name: convertData.converted_file.filename,
+   38:                     url: downloadUrl,
+   39:                     mime: convertData.converted_file.type || '',
+   40:                     fileType: convertData.converted_file.type || 'file'  // ✅ Store file type for message_type detection
+   41:                 };
+   42: 
+   43:                 // 4️⃣ Replace original file in selectedFiles
+   44:                 const index = selectedFiles.findIndex(f => f.name === file.name);
+   45:                 if (index !== -1) {
+   46:                     selectedFiles[index] = convertedRef;
+   47:                 }
+   48: 
+   49:                 // 5️⃣ Update preview
+   50:                 const filePreviewItems = document.getElementById('filePreviewItems');
+   51:                 // Ensure preview container is restored after conversion
+   52:                 const filePreviewContainer = document.getElementById('filePreviewContainer');
+   53:                 if (filePreviewContainer) {
+   54:                     filePreviewContainer.style.display = 'flex';
+   55:                 }
+   56: 
+   57:                 // Replace original preview with converted file preview
+   58:                 filePreviewItems.innerHTML = '';
+   59:                 await addFilePreview(convertedRef);
+   60: 
+   61:                 progressFill.style.width = '100%';
+   62:                 progressText.textContent = 'Conversion complete ✓';
+   63: 
+   64:                 showNotification(
+   65:                     'Success',
+   66:                     `File converted to ${targetFormat.toUpperCase()}`
+   67:                 );
+   68: 
+   69:                 setTimeout(() => {
+   70:                     document.getElementById('conversionPanel').style.display = 'none';
+   71:                     conversionProgress.style.display = 'none';
+   72:                     convertBtnText.style.display = 'inline';
+   73:                     convertBtnSpinner.style.display = 'none';
+   74:                     convertBtn.disabled = false;
+   75: 
+   76:                     // ✅ Enable send ONLY after replacement
+   77:                     sendBtn.disabled = false;
+   78:                 }, 800);
+   79: 
+   80:             } catch (error) {
+   81:                 console.error('❌ Conversion error:', error);
+   82:                 showError('Conversion failed: ' + error.message);
+   83: 
+   84:                 conversionProgress.style.display = 'none';
+   85:                 convertBtnText.style.display = 'inline';
+   86:                 convertBtnSpinner.style.display = 'none';
+   87:                 convertBtn.disabled = false;
+   88:                 sendBtn.disabled = false;
+   89:             }
+   90:         }
+   91: 
+   92:         async function updateFilePreviewAfterConversion(oldFileId, newFile) {
+   93:             // Remove old preview
+   94:             const oldItem = document.querySelector(`[data-file-id="${oldFileId}"]`);
+   95:             if (oldItem) oldItem.remove();
+   96: 
+   97:             // Update attachment list
+   98:             const index = attachedFiles.findIndex(f => f.id === oldFileId);
+   99:             if (index !== -1) {
+  100:                 attachedFiles[index] = newFile;
+  101:             }
+  102: 
+  103:             // Add new preview
+  104:             const container = document.getElementById('filePreviewItems');
+  105:             const item = createFilePreviewItem(newFile);
+  106:             container.insertBefore(item, container.firstChild);
+  107:         }
+  108: 
+  109:         async function showConversionPanel(file, fileExtension) {
+  110:             const panel = document.getElementById('conversionPanel');
+  111:             const currentFormatSpan = document.getElementById('currentFormat');
+  112:             const targetSelect = document.getElementById('targetFormatSelect');
+  113:             const sendBtn = document.getElementById('sendBtn');
+  114: 
+  115:             if (!panel || !currentFormatSpan || !targetSelect) {
+  116:                 console.warn('⚠️ Conversion panel elements not found');
+  117:                 return;
+  118:             }
+  119: 
+  120:             console.log('🔄 Setting up conversion panel for:', fileExtension);
+  121: 
+  122:             // Store file reference for conversion
+  123:             window.currentFileForConversion = file;
+  124: 
+  125:             sendBtn.disabled = false; // Allow sending even without conversion
+  126: 
+  127:             currentFormatSpan.textContent = fileExtension.toUpperCase();
+  128: 
+  129:             // Load conversion formats from backend API
+  130:             const formats = await loadConversionFormats(fileExtension, null);
+  131: 
+  132:             console.log('✅ Available formats for', fileExtension, ':', formats);
+  133: 
+  134:             targetSelect.innerHTML = '<option value="">Select format to convert</option>';
+  135:             formats.forEach(format => {
+  136:                 const option = document.createElement('option');
+  137:                 option.value = format;
+  138:                 option.textContent = `.${format.toUpperCase()}`;
+  139:                 targetSelect.appendChild(option);
+  140:             });
+  141: 
+  142:             if (formats.length > 0) {
+  143:                 panel.style.display = 'block';
+  144:                 console.log('✅ Conversion panel shown with', formats.length, 'formats');
+  145:             } else {
+  146:                 panel.style.display = 'none';
+  147:                 console.log('ℹ️ No conversion formats available for', fileExtension);
+  148:             }
+  149:         }
+  150: 
+  151:         async function sendMessage() {
+  152:             const input = document.getElementById('messageInput');
+  153:             const content = input.value.trim();
+  154: 
+  155:             if (!content && selectedFiles.length === 0) return;
+  156:             if (!activeChat) {
+  157:                 showError('No active chat selected');
+  158:                 return;
+  159:             }
+  160: 
+  161:             const sendBtn = document.getElementById('sendBtn');
+  162:             sendBtn.disabled = true;
+  163: 
+  164:             try {
+  165:                 let attachmentIds = [];
+  166:                 let attachmentTypes = [];  // ✅ Store file types
+  167: 
+  168:                 // Upload files if any
+  169:                 if (selectedFiles.length > 0) {
+  170:                     console.log(`📤 Uploading ${selectedFiles.length} files...`);
+  171: 
+  172:                     // Show uploading indicator
+  173:                     showNotification('Uploading', `Uploading ${selectedFiles.length} file(s)...`);
+  174: 
+  175:                     try {
+  176:                         const uploadResult = await uploadFiles();
+  177:                         attachmentIds = uploadResult.ids || [];
+  178:                         attachmentTypes = uploadResult.types || [];  // ✅ Get file types
+  179: 
+  180:                         if (attachmentIds.length === 0) {
+  181:                             throw new Error('No files were uploaded successfully');
+  182:                         }
+  183: 
+  184:                         // Verify we got valid IDs
+  185:                         if (attachmentIds.some(id => !id || id === 'undefined')) {
+  186:                             throw new Error('Invalid file IDs received from server');
+  187:                         }
+  188: 
+  189:                         console.log('✅ Files uploaded successfully, IDs:', attachmentIds, 'Types:', attachmentTypes);
+  190: 
+  191:                         // Clear file selection
+  192:                         selectedFiles = [];
+  193:                         const filePreviewItems = document.getElementById('filePreviewItems');
+  194:                         if (filePreviewItems) {
+  195:                             filePreviewItems.innerHTML = '';
+  196:                         }
+  197:                         document.getElementById('filePreviewContainer').style.display = 'none';
+  198: 
+  199:                         showNotification('Success', `${attachmentIds.length} file(s) uploaded`);
+  200: 
+  201:                     } catch (uploadError) {
+  202:                         console.error('❌ File upload failed:', uploadError);
+  203:                         showError('Failed to upload files: ' + uploadError.message);
+  204:                         sendBtn.disabled = false;
+  205:                         return; // Stop here if upload fails
+  206:                     }
+  207:                 }
+  208: 
+  209:                 // Send message via WebSocket
+  210:                 if (ws && ws.readyState === WebSocket.OPEN) {
+  211:                     // 🔒 Encrypt message content if E2E key is available
+  212:                     let plainContent = content || '';
+  213:                     let encryptedContent = plainContent;
+  214:                     let isE2eEncrypted = false;
+  215: 
+  216:                     if (plainContent && CryptoEngine.hasKey(activeChat.id)) {
+  217:                         const ct = await CryptoEngine.encryptText(activeChat.id, plainContent);
+  218:                         if (ct) {
+  219:                             encryptedContent = ct;
+  220:                             isE2eEncrypted = true;
+  221:                         }
+  222:                     }
+  223: 
+  224:                     // If any attached file was encrypted, mark the whole message encrypted
+  225:                     if (!isE2eEncrypted && attachmentIds.length > 0 && window._encryptedFileIds) {
+  226:                         isE2eEncrypted = attachmentIds.some(id => window._encryptedFileIds.has(id));
+  227:                     }
+  228: 
+  229:                     // ✅ Determine message type based on uploaded file types
+  230:                     let messageType = 'text';
+  231:                     if (attachmentIds.length > 0) {
+  232:                         // Use first file's type, or 'file' if mixed types
+  233:                         const firstType = attachmentTypes[0] || 'file';
+  234:                         const allSameType = attachmentTypes.every(t => t === firstType);
+  235:                         messageType = allSameType ? firstType : 'file';
+  236:                     }
+  237: 
+  238:                     const messageData = {
+  239:                         type: 'message',
+  240:                         chat_id: activeChat.id,
+  241:                         content: encryptedContent,
+  242:                         encrypted: isE2eEncrypted,
+  243:                         message_type: messageType,  // ✅ Use detected type
+  244:                         attachments: attachmentIds,
+  245:                         reply_to: replyToMessageId || null
+  246:                     };
+  247: 
+  248:                     console.log('📤 Sending message via WebSocket:', messageData);
+  249:                     ws.send(JSON.stringify(messageData));
+  250: 
+  251:                     // Clear input
+  252:                     input.value = '';
+  253:                     input.style.height = 'auto';
+  254: 
+  255:                     // Clear reply indicator
+  256:                     if (replyToMessageId) {
+  257:                         cancelReply();
+  258:                     }
+  259: 
+  260:                     // Stop typing indicator
+  261:                     if (isTyping) {
+  262:                         isTyping = false;
+  263:                         ws.send(JSON.stringify({
+  264:                             type: 'typing',
+  265:                             chat_id: activeChat.id,
+  266:                             is_typing: false
+  267:                         }));
+  268:                     }
+  269: 
+  270:                     console.log('✅ Message sent successfully');

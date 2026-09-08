@@ -1,0 +1,40 @@
+   1: async def get_file(self, request):
+   2:     """Get uploaded file"""
+   3:     try:
+   4:         file_id = request.match_info['file_id']
+   5:         
+   6:         file_meta = await g.redis_client.hgetall(f"file:{file_id}")
+   7:         
+   8:         if not file_meta:
+   9:             return web.json_response({"error": "File not found"}, status=404)
+  10: 
+  11:         try:
+  12:             file_path = _resolve_safe_path(UPLOAD_DIR, file_meta['path'])
+  13:         except ValueError as e:
+  14:             logger.error(f"❌ Blocked path traversal in get_file: {e}")
+  15:             return web.json_response({"error": "Invalid file path"}, status=400)
+  16: 
+  17:         if not file_path.exists():
+  18:             return web.json_response({"error": "File not found"}, status=404)
+  19: 
+  20:         return web.FileResponse(
+  21:             file_path,
+  22:             headers={'Content-Disposition': f'inline; filename="{file_meta.get("filename", "file")}"'}
+  23:         )
+  24: 
+  25:     except Exception as e:
+  26:         logger.error(f"Get file error: {e}")
+  27:         return web.json_response({"error": str(e)}, status=500)
+  28: 
+  29: async def get_thumbnail(self, request):
+  30:     """Get file thumbnail"""
+  31:     try:
+  32:         file_id = request.match_info['file_id']
+  33:         
+  34:         file_meta = await g.redis_client.hgetall(f"file:{file_id}")
+  35:         
+  36:         if not file_meta or not file_meta.get('thumbnail_url'):
+  37:             return web.json_response({"error": "Thumbnail not found"}, status=404)
+  38: 
+  39:         # Construct thumbnail path from file_id and validate it's within UPLOAD_DIR/thumbnails
+  40:         thumb_relative = Path('thumbnails') / f"{file_id}_thumb.jpg"
