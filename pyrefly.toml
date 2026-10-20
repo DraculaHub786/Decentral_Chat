@@ -10,7 +10,6 @@ project-excludes = [
 ]
 search-path = [
     ".venv/Lib/site-packages",
-    "C:/Users/afjal/AppData/Local/Programs/Python/Python311/Lib/site-packages",
     "backend",
     "./backend",
     "app",
@@ -21,8 +20,5 @@ python-version = "3.11.0"
 infer-with-first-use = false
 
 [errors]
-missing-import = "ignore"
-missing-source = "ignore"
-missing-attribute = "ignore"
-bad-return = "ignore"
-no-matching-overload = "ignore"
+missing-import = "warning"
+missing-source = "warning"

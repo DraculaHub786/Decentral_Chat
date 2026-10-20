@@ -186,9 +186,11 @@ async def health_check(request):
         db_status = "connected"
         try:
             if g.db is not None:
-                # Read a single trivial doc to validate connectivity without awaiting synchronous firestore client
-                col = g.db.collection("health_check")
-                list(col.limit(1).stream())
+                # Read a single trivial doc off the event loop via worker thread
+                def _ping_db():
+                    col = g.db.collection("health_check")
+                    return list(col.limit(1).stream())
+                await asyncio.to_thread(_ping_db)
             else:
                 db_status = "unavailable"
         except Exception as db_err:

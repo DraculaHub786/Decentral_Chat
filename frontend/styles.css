@@ -497,16 +497,22 @@ button {
    4. LOGIN & AUTHENTICATION SCREEN
    -------------------------------------------------------------------------- */
 #loginScreen {
-    position: relative;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 100vh;
+    height: 100dvh;
+    width: 100vw;
     display: flex;
     justify-content: center;
     align-items: center;
-    min-height: 100vh;
-    width: 100vw;
     padding: 24px;
     overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
     background: transparent;
-    z-index: 1;
+    z-index: 10;
 }
 
 .login-theme-btn {
@@ -538,6 +544,7 @@ button {
 .login-container {
     max-width: 450px;
     width: 100%;
+    margin: auto 0;
     animation: fadeInUp 0.6s cubic-bezier(0.16, 1, 0.3, 1);
     position: relative;
     z-index: 2;
@@ -754,6 +761,17 @@ button {
     background: rgba(16, 185, 129, 0.15);
     border: 1px solid rgba(16, 185, 129, 0.35);
     color: #86efac;
+}
+
+[data-theme="light"] .error-message {
+    background: rgba(220, 38, 38, 0.10);
+    border: 1px solid rgba(220, 38, 38, 0.32);
+    color: #b91c1c;
+}
+[data-theme="light"] .success-message {
+    background: rgba(16, 185, 129, 0.10);
+    border: 1px solid rgba(5, 150, 105, 0.32);
+    color: #047857;
 }
 
 /* --------------------------------------------------------------------------

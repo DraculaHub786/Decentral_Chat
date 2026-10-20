@@ -1230,8 +1230,9 @@
                     ws = null;
                     updateConnectionStatus(false);
 
-                    // Check if connection was refused due to authentication (code 4001 = token expired, 1008/1011 = auth policy)
-                    if (event.code === 4001 || event.code === 1008 || event.code === 1011) {
+                    // Check if connection was refused due to authentication (code 4001 = token expired, 1008 = auth policy)
+                    // Note: 1011 is an unexpected server error and should trigger reconnect, NOT a forced logout.
+                    if (event.code === 4001 || event.code === 1008) {
                         console.warn('⚠️ WebSocket auth issue (code ' + event.code + '). Attempting session renewal...');
                         _doRefreshToken().then(ok => {
                             if (ok && !window.isLoggingOut) {
@@ -1971,13 +1972,16 @@
             return chatEl;
         }
 
+        let renderChatsGen = 0;
         async function renderChats() {
+            const currentGen = ++renderChatsGen;
             const container = document.getElementById('contactsList');
-            container.innerHTML = '';
+            if (!container) return;
 
             const chatSource = (window.chats && window.chats.length > 0) ? window.chats : chats;
             chats = chatSource;
-            console.log('🎨 Rendering', chatSource.length, 'chats');
+            window.chats = chatSource;
+            console.log('🎨 Rendering', chatSource.length, 'chats (gen:', currentGen, ')');
 
             if (chatSource.length === 0) {
                 container.innerHTML = `
@@ -2009,6 +2013,7 @@
                 return;
             }
 
+            const fragment = document.createDocumentFragment();
             const groups = displayChats.filter(c => c.type === 'group');
             const persons = displayChats.filter(c => c.type !== 'group');
 
@@ -2017,12 +2022,14 @@
                 const grpHeader = document.createElement('div');
                 grpHeader.className = 'contact-section-title';
                 grpHeader.textContent = 'Groups';
-                container.appendChild(grpHeader);
+                fragment.appendChild(grpHeader);
 
                 for (const chat of groups) {
+                    if (currentGen !== renderChatsGen) return;
                     try {
                         const el = await createChatCardElement(chat);
-                        container.appendChild(el);
+                        if (currentGen !== renderChatsGen) return;
+                        fragment.appendChild(el);
                     } catch (e) {
                         console.error('Error rendering group chat:', e);
                     }
@@ -2034,25 +2041,33 @@
                 const pHeader = document.createElement('div');
                 pHeader.className = 'contact-section-title';
                 pHeader.textContent = 'Person';
-                container.appendChild(pHeader);
+                fragment.appendChild(pHeader);
 
                 for (const chat of persons) {
+                    if (currentGen !== renderChatsGen) return;
                     try {
                         const el = await createChatCardElement(chat);
-                        container.appendChild(el);
+                        if (currentGen !== renderChatsGen) return;
+                        fragment.appendChild(el);
                     } catch (e) {
                         console.error('Error rendering person chat:', e);
                     }
                 }
             } else if (filter !== 'all') {
                 for (const chat of displayChats) {
+                    if (currentGen !== renderChatsGen) return;
                     try {
                         const el = await createChatCardElement(chat);
-                        container.appendChild(el);
+                        if (currentGen !== renderChatsGen) return;
+                        fragment.appendChild(el);
                     } catch (e) {
                         console.error('Error rendering chat item:', e);
                     }
                 }
+            }
+
+            if (currentGen === renderChatsGen) {
+                container.replaceChildren(fragment);
             }
         }
 
@@ -3490,12 +3505,19 @@
 
         function handleUserStatus(data) {
             console.log('👤 Real-time user status update:', data.user_id, data.status);
-            chats = chats.map(chat => {
+            const updateStatus = (chat) => {
                 if (chat.id === data.user_id || (chat.type === 'direct' && chat.other_user_id === data.user_id)) {
                     return { ...chat, status: data.status, last_seen: data.last_seen };
                 }
                 return chat;
-            });
+            };
+
+            chats = (chats || []).map(updateStatus);
+            if (window.chats && Array.isArray(window.chats)) {
+                window.chats = window.chats.map(updateStatus);
+            } else {
+                window.chats = chats;
+            }
 
             if (activeChat && (activeChat.other_user_id === data.user_id || activeChat.id === data.user_id)) {
                 activeChat.status = data.status;

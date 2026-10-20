@@ -42,31 +42,38 @@ ALLOWED_EXTENSIONS = {
 def _ensure_secret_key():
     return SECRET_KEY
 
-def _ensure_fernet_key():
+def _ensure_fernet_cipher():
     val = os.getenv('FERNET_KEY')
     if val:
-        return val.encode() if isinstance(val, str) else val
+        raw_key = val.encode() if isinstance(val, str) else val
+        try:
+            suite = Fernet(raw_key)
+            return raw_key, suite
+        except Exception as e:
+            logger.critical(f"❌ Configured FERNET_KEY is invalid: {e}")
+            raise ValueError(f"Configured FERNET_KEY is invalid: must be 32 url-safe base64-encoded bytes. Error: {e}")
+
     # Check if a persistent key file exists
     key_file = BASE_DIR / '.fernet_key'
     if key_file.exists():
         raw = key_file.read_text().strip()
         if raw:
-            return raw.encode()
+            raw_key = raw.encode()
+            try:
+                suite = Fernet(raw_key)
+                return raw_key, suite
+            except Exception as e:
+                logger.warning(f"⚠️ Persisted .fernet_key invalid ({e}); regenerating...")
+
     # Generate and persist
     new_key = Fernet.generate_key()
     try:
         key_file.write_text(new_key.decode())
     except Exception as e:
         logger.warning(f"⚠️ Could not persist fernet key: {e}")
-    return new_key
+    return new_key, Fernet(new_key)
 
-ENCRYPTION_KEY = _ensure_fernet_key()
-try:
-    _fk = ENCRYPTION_KEY.encode() if isinstance(ENCRYPTION_KEY, str) else ENCRYPTION_KEY
-    cipher_suite = Fernet(_fk)
-except Exception:
-    _generated = Fernet.generate_key()
-    cipher_suite = Fernet(_generated)
+ENCRYPTION_KEY, cipher_suite = _ensure_fernet_cipher()
 
 # Expose cipher_suite on the shared globals namespace.
 from app.globals import g as _g

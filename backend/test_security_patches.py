@@ -3,7 +3,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Ensure backend directory is in sys.path
 BASE_DIR = Path(__file__).resolve().parent
@@ -25,6 +25,12 @@ class TestSecurityPatches(unittest.TestCase):
         decrypted = config.cipher_suite.decrypt(encrypted)
         self.assertEqual(decrypted, msg)
 
+    def test_invalid_configured_fernet_key_fails_fast(self):
+        """Verify misconfigured FERNET_KEY raises ValueError rather than generating silently."""
+        with patch.dict(os.environ, {'FERNET_KEY': 'not-a-valid-fernet-key'}):
+            with self.assertRaises(ValueError):
+                config._ensure_fernet_cipher()
+
     def test_cors_origin_prefix_bypass_blocked(self):
         """Verify prefix spoofed origins (e.g. localhost:8080.evil.com) are rejected."""
         req_attack1 = MagicMock(method='POST', headers={'Origin': 'http://localhost:8080.evil.com'})
@@ -39,26 +45,26 @@ class TestSecurityPatches(unittest.TestCase):
 
     def test_is_admin_rejects_unauthenticated_even_in_debug(self):
         """Verify unauthenticated requests cannot gain admin privileges via DEBUG=true."""
-        os.environ['DEBUG'] = 'true'
-        req_unauth = MagicMock(headers={})
-        self.assertFalse(_is_admin(req_unauth))
+        with patch.dict(os.environ, {'DEBUG': 'true'}):
+            req_unauth = MagicMock(headers={})
+            self.assertFalse(_is_admin(req_unauth))
 
-        req_bad_auth = MagicMock(headers={'Authorization': 'Bearer invalid.token.payload'})
-        self.assertFalse(_is_admin(req_bad_auth))
+            req_bad_auth = MagicMock(headers={'Authorization': 'Bearer invalid.token.payload'})
+            self.assertFalse(_is_admin(req_bad_auth))
 
     def test_get_client_ip_anti_spoofing(self):
         """Verify X-Forwarded-For is ignored unless TRUST_PROXY=true."""
-        os.environ['TRUST_PROXY'] = 'false'
         req = MagicMock(remote='192.168.1.50', headers={'X-Forwarded-For': '1.2.3.4'})
-        self.assertEqual(get_client_ip(req), '192.168.1.50')
+        with patch.dict(os.environ, {'TRUST_PROXY': 'false'}):
+            self.assertEqual(get_client_ip(req), '192.168.1.50')
 
         # When proxy trust is explicitly enabled
-        os.environ['TRUST_PROXY'] = 'true'
-        self.assertEqual(get_client_ip(req), '1.2.3.4')
+        with patch.dict(os.environ, {'TRUST_PROXY': 'true'}):
+            self.assertEqual(get_client_ip(req), '1.2.3.4')
 
-        # Multi-hop XFF parsing
-        req_multi = MagicMock(remote='192.168.1.50', headers={'X-Forwarded-For': '203.0.113.195, 70.41.3.18'})
-        self.assertEqual(get_client_ip(req_multi), '203.0.113.195')
+            # Multi-hop XFF parsing
+            req_multi = MagicMock(remote='192.168.1.50', headers={'X-Forwarded-For': '203.0.113.195, 70.41.3.18'})
+            self.assertEqual(get_client_ip(req_multi), '203.0.113.195')
 
 
 class TestFileEndpointAuthorization(unittest.IsolatedAsyncioTestCase):
@@ -81,6 +87,13 @@ class TestFileEndpointAuthorization(unittest.IsolatedAsyncioTestCase):
         """Verify serve_upload rejects private documents without token."""
         from app.files.handlers import serve_upload
         req = MagicMock(match_info={'filename': 'documents/confidential.pdf'}, headers={}, query={})
+        resp = await serve_upload(req)
+        self.assertEqual(resp.status, 401)
+
+    async def test_serve_upload_unauthenticated_chat_thumbnail_rejected(self):
+        """Verify serve_upload rejects chat image thumbnails without token."""
+        from app.files.handlers import serve_upload
+        req = MagicMock(match_info={'filename': 'thumbnails/chat_pic_123_thumb.jpg'}, headers={}, query={})
         resp = await serve_upload(req)
         self.assertEqual(resp.status, 401)
 

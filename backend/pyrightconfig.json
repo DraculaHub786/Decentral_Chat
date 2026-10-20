@@ -12,7 +12,6 @@
   "venv": ".venv",
   "extraPaths": [
     "../.venv/Lib/site-packages",
-    "C:/Users/afjal/AppData/Local/Programs/Python/Python311/Lib/site-packages",
     ".",
     "app"
   ],

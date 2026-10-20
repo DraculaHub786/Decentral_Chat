@@ -527,9 +527,9 @@ async def serve_upload(request: web.Request) -> web.Response:
         except ValueError:
             return web.json_response({"error": "Not found"}, status=404)
 
-        # Allow public access only for avatars and avatar thumbnails
+        # Allow public access only for user profile avatars
         norm_filename = filename.replace('\\', '/')
-        is_avatar = norm_filename.startswith('avatars/') or norm_filename.startswith('thumbnails/')
+        is_avatar = norm_filename.startswith('avatars/')
         if is_avatar:
             if not file_path.exists():
                 return web.json_response({"error": "Not found"}, status=404)
