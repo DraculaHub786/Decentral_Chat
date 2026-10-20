@@ -1,6 +1,7 @@
 """DecentralChatServer: thin orchestrator delegating to modular handlers."""
 import logging
 import asyncio
+import functools
 from aiohttp import web
 from aiohttp_session import setup as setup_session
 from aiohttp_session.cookie_storage import EncryptedCookieStorage
@@ -12,6 +13,7 @@ from app.core.rate_limiter import RateLimiter
 from app.core.redis_client import init_redis
 from app.core.firebase_client import init_firebase
 from app.core.middleware import csrf_middleware, security_headers_middleware
+from app.auth.tokens import generate_token, _generate_refresh_token, get_user_from_token
 
 from app.auth.handlers import (handle_register, handle_login, handle_logout, refresh_token)
 from app.auth.google import handle_google_auth
@@ -35,11 +37,18 @@ from app.calls.handlers import (initiate_call, handle_call_signal, get_call_sign
     end_call, get_call_history)
 from app.calls.group.handlers import (initiate_group_call, join_group_call,
     leave_group_call, get_group_call_participants)
-from app.static.frontend_routes import (serve_frontend, serve_favicon, index, health_check)
+from app.calls.ws_signal import handle_ws_call_signal
+from app.calls.group.ws_signal import (handle_group_call_start,
+    handle_group_call_signal, handle_group_call_ice, handle_group_call_leave_ws)
+from app.ws.connection_manager import (broadcast_user_status, broadcast_to_users,
+    broadcast_typing)
+from app.messages.service import create_message, broadcast_message
+from app.static.frontend_routes import (serve_frontend, serve_favicon,
+    serve_static_asset, index, health_check)
 from app.admin.debug_routes import debug_check_user, debug_redis_state, debug_user_chats
 from app.sync.firestore_sync import (preload_critical_data_from_firestore,
     sync_redis_to_firestore_periodically)
-from app.ws.handler import websocket_handler
+from app.ws.handler import websocket_handler, handle_ws_message, handle_read_receipt
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +60,32 @@ class DecentralChatServer:
         self.storage_bucket = None
         self.db = None
         self.rate_limiter = RateLimiter(max_attempts=5, window_seconds=60)
+
+    # Token helpers used by auth handlers via `self.generate_token(...)` /
+    # `self._generate_refresh_token(...)`. Bound as methods so the wired
+    # handlers (which take `(self, request)`) can reach them through `self`.
+    generate_token = generate_token
+    _generate_refresh_token = _generate_refresh_token
+    get_user_from_token = get_user_from_token
+
+    # WebSocket handler helpers used via `self.<name>(...)` inside
+    # websocket_handler. Bound as methods so the wired handler (which takes
+    # `(self, request)`) can reach them through `self`, mirroring the
+    # token helpers above. All of these are defined with `self` as their
+    # first parameter in their respective modules.
+    websocket_handler = websocket_handler
+    handle_ws_message = handle_ws_message
+    handle_read_receipt = handle_read_receipt
+    broadcast_user_status = broadcast_user_status
+    broadcast_to_users = broadcast_to_users
+    broadcast_typing = broadcast_typing
+    handle_ws_call_signal = handle_ws_call_signal
+    handle_group_call_start = handle_group_call_start
+    handle_group_call_signal = handle_group_call_signal
+    handle_group_call_ice = handle_group_call_ice
+    handle_group_call_leave_ws = handle_group_call_leave_ws
+    create_message = create_message
+    broadcast_message = broadcast_message
 
     async def initialize(self):
         """Initialize all services."""
@@ -95,39 +130,44 @@ class DecentralChatServer:
         self.app.router.add_get('/api', index)
         self.app.router.add_get('/health', health_check)
 
-        # Authentication
-        self.app.router.add_post('/api/auth/register', handle_register)
-        self.app.router.add_post('/api/auth/login', handle_login)
-        self.app.router.add_post('/api/auth/google', handle_google_auth)
-        self.app.router.add_post('/api/auth/logout', handle_logout)
-        self.app.router.add_post('/api/auth/refresh', refresh_token)
+        # Catch-all for frontend static assets (styles.css, app.js, images,
+        # etc.) referenced by index.html via relative paths. Registered after
+        # the explicit API routes so it never shadows them.
+        self.app.router.add_get('/{filename:.*}', serve_static_asset)
+
+        # Authentication (handlers take (self, request) -> bind self)
+        self.app.router.add_post('/api/auth/register', functools.partial(handle_register, self))
+        self.app.router.add_post('/api/auth/login', functools.partial(handle_login, self))
+        self.app.router.add_post('/api/auth/google', functools.partial(handle_google_auth, self))
+        self.app.router.add_post('/api/auth/logout', functools.partial(handle_logout, self))
+        self.app.router.add_post('/api/auth/refresh', functools.partial(refresh_token, self))
 
         # User management
-        self.app.router.add_get('/api/users/me', get_current_user)
-        self.app.router.add_put('/api/users/me', update_profile)
-        self.app.router.add_post('/api/users/avatar', upload_avatar)
-        self.app.router.add_get('/api/users/search', search_users)
-        self.app.router.add_get('/api/users/{user_id}/public_key', get_user_public_key)
+        self.app.router.add_get('/api/users/me', functools.partial(get_current_user, self))
+        self.app.router.add_put('/api/users/me', functools.partial(update_profile, self))
+        self.app.router.add_post('/api/users/avatar', functools.partial(upload_avatar, self))
+        self.app.router.add_get('/api/users/search', functools.partial(search_users, self))
+        self.app.router.add_get('/api/users/{user_id}/public_key', functools.partial(get_user_public_key, self))
 
         # Contacts
-        self.app.router.add_get('/api/contacts', get_contacts)
-        self.app.router.add_post('/api/contacts', add_contact)
-        self.app.router.add_delete('/api/contacts/{contact_id}', remove_contact)
+        self.app.router.add_get('/api/contacts', functools.partial(get_contacts, self))
+        self.app.router.add_post('/api/contacts', functools.partial(add_contact, self))
+        self.app.router.add_delete('/api/contacts/{contact_id}', functools.partial(remove_contact, self))
 
         # Chats
-        self.app.router.add_get('/api/chats', get_chats)
-        self.app.router.add_post('/api/chats', create_chat)
-        self.app.router.add_get('/api/chats/{chat_id}', get_chat)
-        self.app.router.add_delete('/api/chats/{chat_id}', delete_chat)
-        self.app.router.add_post('/api/chats/{chat_id}/members', add_chat_member)
-        self.app.router.add_delete('/api/chats/{chat_id}/members/{user_id}', remove_chat_member)
+        self.app.router.add_get('/api/chats', functools.partial(get_chats, self))
+        self.app.router.add_post('/api/chats', functools.partial(create_chat, self))
+        self.app.router.add_get('/api/chats/{chat_id}', functools.partial(get_chat, self))
+        self.app.router.add_delete('/api/chats/{chat_id}', functools.partial(delete_chat, self))
+        self.app.router.add_post('/api/chats/{chat_id}/members', functools.partial(add_chat_member, self))
+        self.app.router.add_delete('/api/chats/{chat_id}/members/{user_id}', functools.partial(remove_chat_member, self))
 
         # Messages
-        self.app.router.add_get('/api/chats/{chat_id}/messages', get_messages)
-        self.app.router.add_post('/api/chats/{chat_id}/messages', send_message_http)
-        self.app.router.add_delete('/api/messages/{message_id}', delete_message)
-        self.app.router.add_put('/api/messages/{message_id}', edit_message)
-        self.app.router.add_get('/api/chats/{chat_id}/messages/search', search_messages_in_chat)
+        self.app.router.add_get('/api/chats/{chat_id}/messages', functools.partial(get_messages, self))
+        self.app.router.add_post('/api/chats/{chat_id}/messages', functools.partial(send_message_http, self))
+        self.app.router.add_delete('/api/messages/{message_id}', functools.partial(delete_message, self))
+        self.app.router.add_put('/api/messages/{message_id}', functools.partial(edit_message, self))
+        self.app.router.add_get('/api/chats/{chat_id}/messages/search', functools.partial(search_messages_in_chat, self))
 
         # Files
         self.app.router.add_post('/api/upload', upload_file)
@@ -140,52 +180,52 @@ class DecentralChatServer:
         self.app.router.add_get('/api/files/conversion-progress/{conversion_id}', get_conversion_progress)
 
         # Calls
-        self.app.router.add_post('/api/calls/initiate', initiate_call)
-        self.app.router.add_post('/api/calls/{call_id}/signal', handle_call_signal)
-        self.app.router.add_post('/api/calls/{call_id}/end', end_call)
-        self.app.router.add_get('/api/calls/history', get_call_history)
-        self.app.router.add_get('/api/calls/{call_id}/signals', get_call_signals)
+        self.app.router.add_post('/api/calls/initiate', functools.partial(initiate_call, self))
+        self.app.router.add_post('/api/calls/{call_id}/signal', functools.partial(handle_call_signal, self))
+        self.app.router.add_post('/api/calls/{call_id}/end', functools.partial(end_call, self))
+        self.app.router.add_get('/api/calls/history', functools.partial(get_call_history, self))
+        self.app.router.add_get('/api/calls/{call_id}/signals', functools.partial(get_call_signals, self))
 
         # Group Calls
-        self.app.router.add_post('/api/calls/group/initiate', initiate_group_call)
-        self.app.router.add_post('/api/calls/group/{call_id}/join', join_group_call)
-        self.app.router.add_post('/api/calls/group/{call_id}/leave', leave_group_call)
-        self.app.router.add_get('/api/calls/group/{call_id}/participants', get_group_call_participants)
+        self.app.router.add_post('/api/calls/group/initiate', functools.partial(initiate_group_call, self))
+        self.app.router.add_post('/api/calls/group/{call_id}/join', functools.partial(join_group_call, self))
+        self.app.router.add_post('/api/calls/group/{call_id}/leave', functools.partial(leave_group_call, self))
+        self.app.router.add_get('/api/calls/group/{call_id}/participants', functools.partial(get_group_call_participants, self))
 
         # WebSocket
-        self.app.router.add_get('/api/ws', websocket_handler)
+        self.app.router.add_get('/api/ws', functools.partial(websocket_handler, self))
 
         # Settings routes
-        self.app.router.add_get('/api/users/settings', get_user_settings)
-        self.app.router.add_put('/api/users/settings', update_user_settings)
-        self.app.router.add_put('/api/users/profile', update_user_profile)
+        self.app.router.add_get('/api/users/settings', functools.partial(get_user_settings, self))
+        self.app.router.add_put('/api/users/settings', functools.partial(update_user_settings, self))
+        self.app.router.add_put('/api/users/profile', functools.partial(update_user_profile, self))
 
         # Phone verification routes
-        self.app.router.add_post('/api/auth/send-verification-code', send_verification_code)
-        self.app.router.add_post('/api/auth/verify-phone', verify_phone_code)
+        self.app.router.add_post('/api/auth/send-verification-code', functools.partial(send_verification_code, self))
+        self.app.router.add_post('/api/auth/verify-phone', functools.partial(verify_phone_code, self))
 
         # Enhanced message actions
-        self.app.router.add_delete('/api/messages/{message_id}/for-all', delete_message_for_all)
-        self.app.router.add_delete('/api/messages/{message_id}/for-me', delete_message_for_me)
-        self.app.router.add_post('/api/messages/forward', forward_message)
+        self.app.router.add_delete('/api/messages/{message_id}/for-all', functools.partial(delete_message_for_all, self))
+        self.app.router.add_delete('/api/messages/{message_id}/for-me', functools.partial(delete_message_for_me, self))
+        self.app.router.add_post('/api/messages/forward', functools.partial(forward_message, self))
 
         # Debug routes
-        self.app.router.add_get('/api/debug/check-user/{username}', debug_check_user)
-        self.app.router.add_get('/api/debug/redis/{username}', debug_redis_state)
-        self.app.router.add_get('/api/debug/my-chats', debug_user_chats)
-        self.app.router.add_get('/api/users/{user_id}/blocked-status', check_blocked_status)
+        self.app.router.add_get('/api/debug/check-user/{username}', functools.partial(debug_check_user, self))
+        self.app.router.add_get('/api/debug/redis/{username}', functools.partial(debug_redis_state, self))
+        self.app.router.add_get('/api/debug/my-chats', functools.partial(debug_user_chats, self))
+        self.app.router.add_get('/api/users/{user_id}/blocked-status', functools.partial(check_blocked_status, self))
 
         # Updates in profile
-        self.app.router.add_put('/api/chats/{chat_id}/info', update_group_chat)
-        self.app.router.add_put('/api/users/email', update_email)
-        self.app.router.add_put('/api/users/phone', update_phone)
-        self.app.router.add_get('/api/users/search-all', search_all_users)
-        self.app.router.add_get('/api/users/{user_id}', get_user_by_id)
+        self.app.router.add_put('/api/chats/{chat_id}/info', functools.partial(update_group_chat, self))
+        self.app.router.add_put('/api/users/email', functools.partial(update_email, self))
+        self.app.router.add_put('/api/users/phone', functools.partial(update_phone, self))
+        self.app.router.add_get('/api/users/search-all', functools.partial(search_all_users, self))
+        self.app.router.add_get('/api/users/{user_id}', functools.partial(get_user_by_id, self))
 
         # Blocking routes
-        self.app.router.add_post('/api/users/block', block_user)
-        self.app.router.add_post('/api/users/unblock', unblock_user)
-        self.app.router.add_get('/api/users/blocked', get_blocked_users)
+        self.app.router.add_post('/api/users/block', functools.partial(block_user, self))
+        self.app.router.add_post('/api/users/unblock', functools.partial(unblock_user, self))
+        self.app.router.add_get('/api/users/blocked', functools.partial(get_blocked_users, self))
 
         logger.info("=" * 70)
         logger.info("📋 Registered API Routes:")

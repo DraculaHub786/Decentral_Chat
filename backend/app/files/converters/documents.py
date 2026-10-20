@@ -25,6 +25,17 @@ from app.core.security import (_ensure_secret_key, _ensure_fernet_key,
 from app.core.rate_limiter import RateLimiter
 from app.core.redis_client import MockRedis, MockPipeline
 from app.core.firebase_client import init_firebase
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None
+
+try:
+    import markdown
+except ImportError:
+    markdown = None
+
 logger = logging.getLogger(__name__)
 def convert_document_format(input_path, output_path, source_ext, target_ext):
     """Convert document formats - supports all major document types"""
@@ -58,7 +69,7 @@ def convert_document_format(input_path, output_path, source_ext, target_ext):
                 try:
                     logger.info("🔄 Method 1: Using pdf2docx for high-quality PDF→DOCX conversion (preserves images & formatting)")
                     cv = PDFConverter(input_path)
-                    cv.convert(output_path, start=0, end=None)
+                    cv.convert(output_path)
                     cv.close()
                     
                     # Verify the output file was created and has content
@@ -240,7 +251,7 @@ def convert_document_format(input_path, output_path, source_ext, target_ext):
                 html_content = f.read()
             
             # Parse HTML and extract text using BeautifulSoup if available
-            if HAS_BS4:
+            if HAS_BS4 and BeautifulSoup is not None:
                 logger.info("🔄 Using BeautifulSoup for HTML parsing")
                 soup = BeautifulSoup(html_content, 'html.parser')
                 text = soup.get_text(separator='\\n')

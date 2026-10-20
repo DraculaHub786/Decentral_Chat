@@ -1,91 +1,93 @@
-from typing import Dict, Set, Optional, List
-from aiohttp import web
-import aiohttp_cors
-from aiohttp_session import get_session
-import asyncio, json, hashlib, jwt, datetime, uuid, os, base64, bcrypt, random, mimetypes, secrets, string, shutil, subprocess, tempfile, io
-from datetime import timedelta
-import firebase_admin
-from firebase_admin import credentials, auth as firebase_auth, storage as firebase_storage, firestore
-import redis.asyncio as redis
-from cryptography.fernet import Fernet
-import logging
+import sys
 from pathlib import Path
-from PIL import Image, ImageOps
-import PyPDF2
-from docx import Document
-from pptx import Presentation
-import openpyxl
-from app.globals import g
-from app.core.config import (REDIS_URL, SECRET_KEY, FIREBASE_CRED, PORT,
-    MAX_FILE_SIZE, UPLOAD_DIR, ALLOWED_EXTENSIONS, ENCRYPTION_KEY,
-    HAS_LIBREOFFICE, HAS_UNOCONV, FFMPEG_PATH, HAS_PDF2DOCX, PDFConverter,
-    HAS_BS4, HAS_MARKDOWN, print_conversion_capabilities)
-from app.core.security import (_ensure_secret_key, _ensure_fernet_key,
-    _validate_password, _validate_file_magic, _resolve_safe_path, _log_safe, _is_admin)
-from app.core.rate_limiter import RateLimiter
-from app.core.redis_client import MockRedis, MockPipeline
-from app.core.firebase_client import init_firebase
+from typing import Optional, Dict, Any
+import uuid
+import datetime
+import jwt
+import logging
+
+_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
+try:
+    from app.globals import g
+    from app.core.config import SECRET_KEY, ACCESS_TOKEN_LIFETIME_DAYS, REFRESH_TOKEN_LIFETIME_DAYS
+except ImportError:
+    from ..globals import g
+    from ..core.config import SECRET_KEY, ACCESS_TOKEN_LIFETIME_DAYS, REFRESH_TOKEN_LIFETIME_DAYS
+
 logger = logging.getLogger(__name__)
-import pickle
-from app.core.redis_client import (init_redis)
-def generate_token(self, user_id: str) -> str:
-    """Generate JWT access token (15-minute expiry)"""
+
+
+def generate_token(self_or_user_id, user_id: Optional[str] = None) -> str:
+    """Generate JWT access token (long-lived 7-day session for uninterrupted chat experience)"""
+    uid = user_id if user_id is not None else self_or_user_id
     payload = {
-        'user_id': user_id,
-        'exp': datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=15),
+        'user_id': uid,
+        'exp': datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=ACCESS_TOKEN_LIFETIME_DAYS),
         'iat': datetime.datetime.now(datetime.UTC)
     }
     return jwt.encode(payload, SECRET_KEY, algorithm='HS256')
 
-async def _generate_refresh_token(self, user_id: str, device_fingerprint: str = '') -> str:
-    """Generate a 30-day refresh token, stored in Redis for rotation.
 
-    Made async so the persistence write is properly awaited instead of
-    fire-and-forget (avoids the previous event-loop race where the token
-    metadata could fail to persist before the token was returned).
-    """
+async def _generate_refresh_token(self_or_user_id, user_id: Optional[str] = None, device_fingerprint: str = '') -> str:
+    """Generate a 90-day refresh token, stored in Redis for rotation and seamless session extension."""
+    uid = user_id if user_id is not None else self_or_user_id
     token_id = str(uuid.uuid4())
     payload = {
-        'user_id': user_id,
+        'user_id': uid,
         'token_id': token_id,
         'type': 'refresh',
-        'exp': datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=30),
+        'exp': datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=REFRESH_TOKEN_LIFETIME_DAYS),
         'iat': datetime.datetime.now(datetime.UTC)
     }
     refresh_token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
-    # Store in Redis with device fingerprint for revocation / rotation.
-    # Await directly (caller is already async) so persistence is guaranteed.
+
     try:
         token_data = {
-            'user_id': user_id,
+            'user_id': uid,
             'device_fingerprint': device_fingerprint,
             'created_at': datetime.datetime.now(datetime.UTC).isoformat()
         }
-        await self._store_refresh_token(token_id, token_data)
-    except Exception:
-        pass  # Gracefully degrade: refresh still works, just no persistence
+        await _store_refresh_token(token_id, token_data)
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to persist refresh token to Redis: {e}")
+
     return refresh_token
 
-async def _store_refresh_token(self, token_id: str, token_data: dict):
-    """Persist refresh token metadata in Redis."""
-    try:
-        await g.redis_client.hset(f"refresh_token:{token_id}", mapping=token_data)
-        await g.redis_client.expire(f"refresh_token:{token_id}", 30 * 24 * 3600)  # 30 days
-    except Exception:
-        pass
 
-async def get_user_from_token(self, request) -> Optional[str]:
-    """Extract user ID from JWT token"""
+async def _store_refresh_token(self_or_token_id, token_id_or_data, token_data_opt=None):
+    """Persist refresh token metadata in Redis (supports both self and direct function calls)."""
+    if token_data_opt is not None:
+        token_id = token_id_or_data
+        token_data = token_data_opt
+    else:
+        token_id = self_or_token_id
+        token_data = token_id_or_data
+
     try:
-        auth_header = request.headers.get('Authorization', '')
+        if g.redis_client:
+            await g.redis_client.hset(f"refresh_token:{token_id}", mapping=token_data)
+            await g.redis_client.expire(f"refresh_token:{token_id}", REFRESH_TOKEN_LIFETIME_DAYS * 24 * 3600)
+    except Exception as e:
+        logger.warning(f"⚠️ Redis error storing refresh token {token_id}: {e}")
+
+
+async def get_user_from_token(self_or_request, request=None) -> Optional[str]:
+    """Extract user ID from JWT token.
+    
+    Supports both method call `self.get_user_from_token(request)` and
+    standalone function call `get_user_from_token(request)`.
+    """
+    req = request if request is not None else self_or_request
+    try:
+        auth_header = req.headers.get('Authorization', '')
         if not auth_header.startswith('Bearer '):
             return None
         
         token = auth_header.replace('Bearer ', '')
         payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
         return payload.get('user_id')
-    except jwt.ExpiredSignatureError:
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, Exception):
         return None
-    except jwt.InvalidTokenError:
-        return None
-

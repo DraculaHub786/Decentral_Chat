@@ -280,26 +280,22 @@ async def preload_critical_data_from_firestore(self):
         logger.info("🎉 Data preload complete!")
 
 
-        # ========== LOAD BLOCKED USERS ==========
-        logger.info("📥 Preloading blocked users from Firestore...")
-        blocked_count = 0
-        
-        for user_id in users_list:
-            try:
-                blocked_ref = self.db.collection('users').document(user_id).collection('blocked')
-                blocked_docs = blocked_ref.stream()
-                
-                for blocked_doc in blocked_docs:
-                    blocked_user_id = blocked_doc.id
-                    await g.redis_client.sadd(f"user_blocked:{user_id}", blocked_user_id)
-                    blocked_count += 1
-                    
-            except Exception as e:
-                logger.warning(f"Could not load blocked users for {user_id}: {e}")
-        
-        logger.info(f"✅ Preloaded {blocked_count} blocked relationships from Firestore")
+        # ========== LOAD BLOCKED USERS (Background task so server starts immediately) ==========
+        async def _preload_blocked_in_bg():
+            logger.info("📥 Preloading blocked users from Firestore in background...")
+            blocked_count = 0
+            for uid in users_list:
+                try:
+                    blocked_ref = self.db.collection('users').document(uid).collection('blocked')
+                    for blocked_doc in blocked_ref.stream():
+                        await g.redis_client.sadd(f"user_blocked:{uid}", blocked_doc.id)
+                        blocked_count += 1
+                except Exception as e:
+                    logger.warning(f"Could not load blocked users for {uid}: {e}")
+            logger.info(f"✅ Background preloaded {blocked_count} blocked relationships from Firestore")
 
-        logger.info("🎉 Data preload complete!")
+        asyncio.create_task(_preload_blocked_in_bg())
+        logger.info("🎉 Critical data preload complete!")
         
     except Exception as e:
         logger.error(f"❌ Error preloading data from Firestore: {e}", exc_info=True)

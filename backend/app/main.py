@@ -15,6 +15,7 @@ if _env in ("production", "prod", "staging"):
 else:
     os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 
+from aiohttp.web import AppRunner, TCPSite
 from app.core.config import UPLOAD_DIR
 from app.server import DecentralChatServer
 
@@ -34,16 +35,41 @@ def create_app():
 
 
 async def run_server():
-    """Async entrypoint: initialize and serve the app (host/port from config)."""
+    """Async entrypoint: initialize and serve the app (host/port from config).
+
+    Binds on BOTH IPv4 (0.0.0.0) and IPv6 (::1) so that clients resolving
+    ``localhost`` to ``::1`` (the default on Windows/macOS) still reach the
+    server. Binding only to 0.0.0.0 made the browser fail with a
+    "network error" because it connected to the unreachable IPv6 address.
+    """
     server = DecentralChatServer()
     await server.initialize()
     from app.core.config import PORT
     runner = AppRunner(server.app)
     await runner.setup()
-    site = TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    logger.info(f"🚀 Server running on http://0.0.0.0:{PORT}")
+    await _bind_all(runner, PORT)
     return runner
+
+
+async def _bind_all(runner, port):
+    """Start a TCPSite on every viable listen address; ignore ones that fail.
+
+    Tries IPv4 (0.0.0.0) and IPv6 (::1). If the HOST env var is set, only that
+    single address is used. Raises if no address could be bound.
+    """
+    override = os.getenv('HOST', '').strip()
+    hosts = [override] if override else ['0.0.0.0', '::1']
+    bound = []
+    for host in hosts:
+        try:
+            site = TCPSite(runner, host, port)
+            await site.start()
+            bound.append(host)
+            logger.info(f"🚀 Listening on http://{host}:{port}")
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"⚠️ Could not bind to {host}:{port} ({e})")
+    if not bound:
+        raise RuntimeError("Failed to bind any listen address")
 
 
 def main():
@@ -73,7 +99,7 @@ def main():
     try:
         loop.run_until_complete(server.initialize())
         from app.core.config import PORT
-        web_run_app(server.app, port=PORT, host='0.0.0.0')
+        _run_app_dual_stack(server.app, PORT)
     except KeyboardInterrupt:
         logger.info("🛑 Server shutting down...")
     finally:
@@ -85,14 +111,34 @@ from aiohttp import web as _web
 from aiohttp.web import AppRunner as _AppRunner, TCPSite as _TCPSite
 
 
-def web_run_app(app, port, host='0.0.0.0'):
-    """Start the app and block serving (mirrors aiohttp.web.run_app)."""
+def _run_app_dual_stack(app, port, host=None):
+    """Start the app and block serving, listening on both IPv4 and IPv6.
+
+    ``host`` (single address) may be passed via the HOST env var to force a
+    specific bind (e.g. '0.0.0.0' or '::1'). Otherwise both '0.0.0.0' and
+    '::1' are bound so that ``localhost`` (which resolves to ::1 on Windows/
+    macOS) and ``127.0.0.1`` both reach the server.
+    """
+    if host is None:
+        host = os.getenv('HOST', '').strip()
+
     runner = _AppRunner(app)
     loop = asyncio.get_event_loop()
     loop.run_until_complete(runner.setup())
-    site = _TCPSite(runner, host, port)
-    loop.run_until_complete(site.start())
-    logger.info(f"🚀 Server running on http://{host}:{port}")
+
+    hosts = [host] if host else ['0.0.0.0', '::1']
+    bound = []
+    for h in hosts:
+        try:
+            site = _TCPSite(runner, h, port)
+            loop.run_until_complete(site.start())
+            bound.append(h)
+            logger.info(f"🚀 Listening on http://{h}:{port}")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not bind to {h}:{port} ({e})")
+
+    if not bound:
+        raise RuntimeError("Failed to bind any listen address")
 
     try:
         loop.run_forever()

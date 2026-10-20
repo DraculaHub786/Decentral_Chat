@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 from app.ws.connection_manager import broadcast_to_users, broadcast_user_status, broadcast_typing
 async def create_message(self, chat_id: str, sender_id: str, content: str,
                     message_type: str = 'text', encrypted: bool = True,
-                    attachments: List[str] = None, reply_to: str = None) -> str:
+                    attachments: Optional[List[str]] = None, reply_to: Optional[str] = None) -> str:
     """Create and store message"""
     message_id = str(uuid.uuid4())
     

@@ -1,10 +1,16 @@
 """Environment configuration, constants, and crypto setup."""
+import sys
 import os
 import logging
 import shutil
 import subprocess
 from cryptography.fernet import Fernet
 from pathlib import Path
+
+# Ensure 'backend' directory is in sys.path so 'app.*' imports resolve cleanly
+_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +20,10 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret-change-me')
 FIREBASE_CRED = os.getenv('FIREBASE_CRED', 'firebase-config.json')
 PORT = int(os.getenv('PORT', '8080'))
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
+
+# Session / JWT token lifetimes (in days)
+ACCESS_TOKEN_LIFETIME_DAYS = int(os.getenv('ACCESS_TOKEN_LIFETIME_DAYS', '7'))
+REFRESH_TOKEN_LIFETIME_DAYS = int(os.getenv('REFRESH_TOKEN_LIFETIME_DAYS', '90'))
 
 # Base dirs
 BASE_DIR = Path(__file__).resolve().parent.parent.parent  # backend/
@@ -33,14 +43,30 @@ def _ensure_secret_key():
     return SECRET_KEY
 
 def _ensure_fernet_key():
-    return os.getenv('FERNET_KEY', SECRET_KEY)
+    val = os.getenv('FERNET_KEY')
+    if val:
+        return val.encode() if isinstance(val, str) else val
+    # Check if a persistent key file exists
+    key_file = BASE_DIR / '.fernet_key'
+    if key_file.exists():
+        raw = key_file.read_text().strip()
+        if raw:
+            return raw.encode()
+    # Generate and persist
+    new_key = Fernet.generate_key()
+    try:
+        key_file.write_text(new_key.decode())
+    except Exception as e:
+        logger.warning(f"⚠️ Could not persist fernet key: {e}")
+    return new_key
 
 ENCRYPTION_KEY = _ensure_fernet_key()
 try:
     _fk = ENCRYPTION_KEY.encode() if isinstance(ENCRYPTION_KEY, str) else ENCRYPTION_KEY
     cipher_suite = Fernet(_fk)
 except Exception:
-    cipher_suite = Fernet.generate_key()
+    _generated = Fernet.generate_key()
+    cipher_suite = Fernet(_generated)
 
 # Expose cipher_suite on the shared globals namespace.
 from app.globals import g as _g

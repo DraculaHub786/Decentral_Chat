@@ -1,0 +1,28 @@
+project-includes = [
+    "backend",
+    "backend/app",
+]
+project-excludes = [
+    "**/node_modules",
+    "**/__pycache__",
+    "uploads",
+    ".venv",
+]
+search-path = [
+    ".venv/Lib/site-packages",
+    "C:/Users/afjal/AppData/Local/Programs/Python/Python311/Lib/site-packages",
+    "backend",
+    "./backend",
+    "app",
+    ".",
+]
+python-platform = "win32"
+python-version = "3.11.0"
+infer-with-first-use = false
+
+[errors]
+missing-import = "ignore"
+missing-source = "ignore"
+missing-attribute = "ignore"
+bad-return = "ignore"
+no-matching-overload = "ignore"

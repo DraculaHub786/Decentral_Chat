@@ -25,19 +25,98 @@
         const { apiUrl: API_URL, wsUrl: WS_URL } = detectAPIURL();
 
         console.log('🌐 API URL:', API_URL);
-        console.log('🔌 WebSocket URL:', WS_URL);
         const GOOGLE_CLIENT_ID = '429063225880-ik4tc871593fth7vm8up51enuh8qf460.apps.googleusercontent.com';
 
-        // ===== TOKEN REFRESH INTERCEPTOR =====
-        // Wraps fetch() to auto-refresh on 401 and retry the original request.
+        // ===== MODERN THEME MANAGEMENT SYSTEM (Dark / Light Glassmorphism) =====
+        function initTheme() {
+            const savedTheme = localStorage.getItem('decentral_theme');
+            const theme = savedTheme || 'dark';
+            applyTheme(theme);
+        }
+
+        function applyTheme(theme) {
+            document.documentElement.setAttribute('data-theme', theme);
+            document.body.setAttribute('data-theme', theme);
+
+            const isDark = theme === 'dark';
+            const icon = isDark ? '🌙' : '☀️';
+
+            const themeIcon = document.getElementById('themeIcon');
+            if (themeIcon) themeIcon.textContent = icon;
+
+            const loginThemeIcon = document.getElementById('loginThemeIcon');
+            if (loginThemeIcon) loginThemeIcon.textContent = icon;
+
+            const themeToggleBtn = document.getElementById('themeToggleBtn');
+            if (themeToggleBtn) {
+                themeToggleBtn.setAttribute('title', isDark ? 'Switch to Light Theme' : 'Switch to Dark Theme');
+            }
+
+            const settingsToggle = document.getElementById('settingsThemeToggle');
+            if (settingsToggle) {
+                settingsToggle.checked = isDark;
+            }
+
+            localStorage.setItem('decentral_theme', theme);
+        }
+
+        function toggleTheme(preferredTheme) {
+            const currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+            const newTheme = (preferredTheme && typeof preferredTheme === 'string')
+                ? preferredTheme
+                : (currentTheme === 'dark' ? 'light' : 'dark');
+            applyTheme(newTheme);
+            if (typeof showToast === 'function') {
+                showToast(`Switched to ${newTheme === 'dark' ? 'Cyber Obsidian Glass' : 'Alabaster Spatial Glass'} theme`, 'info');
+            }
+        }
+
+        window.initTheme = initTheme;
+        window.applyTheme = applyTheme;
+        window.toggleTheme = toggleTheme;
+        initTheme();
+        // The interceptor helpers (apiFetch / _doRefreshToken) MUST call this
+        // original directly. If they call the patched global `fetch`, every
+        // request re-enters the wrapper and calls apiFetch again -> infinite
+        // recursion (Maximum call stack size exceeded) which the auth catch
+        // blocks surface as "Connection error" on login/register/Google.
+        const _originalFetch = window.fetch;
+
+        // ===== TOKEN REFRESH & PERSISTENT SESSION SYSTEM =====
+        // Proactively renews access tokens in the background and intercepts 401s
         let _refreshingToken = false;
         let _refreshQueue = [];
+        let _tokenRefreshTimer = null;
+
+        // Parse JWT payload without external library
+        function parseJwtPayload(token) {
+            if (!token || typeof token !== 'string') return null;
+            try {
+                const parts = token.split('.');
+                if (parts.length !== 3) return null;
+                const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+                const jsonPayload = decodeURIComponent(atob(base64).split('').map(c => {
+                    return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+                }).join(''));
+                return JSON.parse(jsonPayload);
+            } catch {
+                return null;
+            }
+        }
+
+        // Returns true if token is expired or within bufferSeconds of expiring (default: 1 hour)
+        function isTokenExpiringSoon(token, bufferSeconds = 3600) {
+            const payload = parseJwtPayload(token);
+            if (!payload || !payload.exp) return true;
+            const now = Math.floor(Date.now() / 1000);
+            return (payload.exp - now) < bufferSeconds;
+        }
 
         async function _doRefreshToken() {
             const rt = localStorage.getItem('refresh_token');
             if (!rt) return false;
             try {
-                const resp = await fetch(API_URL + '/auth/refresh', {
+                const resp = await _originalFetch(API_URL + '/auth/refresh', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ refresh_token: rt })
@@ -48,12 +127,62 @@
                     localStorage.setItem('auth_token', data.token);
                     if (data.refresh_token) localStorage.setItem('refresh_token', data.refresh_token);
                     authToken = data.token;
+
+                    // Automatically update WebSocket authentication with the fresh token
+                    if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) {
+                        try {
+                            ws.send(JSON.stringify({ type: 'auth', token: authToken }));
+                            console.log('🔌 WebSocket re-authenticated with renewed token');
+                        } catch (wsErr) {
+                            console.warn('Could not re-authenticate WebSocket with renewed token:', wsErr);
+                        }
+                    }
+
+                    // Reschedule proactive background renewal
+                    scheduleProactiveTokenRefresh();
                     return true;
                 }
                 return false;
-            } catch {
+            } catch (err) {
+                console.warn('Token refresh request failed:', err);
                 return false;
             }
+        }
+
+        // Proactive background scheduler: renews token well before it expires
+        function scheduleProactiveTokenRefresh() {
+            if (_tokenRefreshTimer) {
+                clearTimeout(_tokenRefreshTimer);
+                _tokenRefreshTimer = null;
+            }
+
+            const token = authToken || localStorage.getItem('auth_token');
+            const rt = localStorage.getItem('refresh_token');
+            if (!token || !rt || window.isLoggingOut) return;
+
+            const payload = parseJwtPayload(token);
+            let checkDelayMs = 15 * 60 * 1000; // default 15 min check
+
+            if (payload && payload.exp) {
+                const now = Math.floor(Date.now() / 1000);
+                const secondsUntilExp = payload.exp - now;
+                // Renew when 2 hours remain, or after half lifetime if shorter
+                const renewAtSeconds = Math.max(30, secondsUntilExp - 7200);
+                checkDelayMs = Math.min(renewAtSeconds * 1000, 24 * 3600 * 1000);
+            }
+
+            console.log(`⏰ Proactive token renewal scheduled in ${Math.round(checkDelayMs / 60000)} minutes`);
+
+            _tokenRefreshTimer = setTimeout(async () => {
+                if (!window.isLoggingOut && localStorage.getItem('auth_token') && localStorage.getItem('refresh_token')) {
+                    console.log('🔄 Proactively renewing session token in background...');
+                    const ok = await _doRefreshToken();
+                    if (ok) {
+                        console.log('✅ Session token renewed successfully in background');
+                    }
+                }
+                scheduleProactiveTokenRefresh();
+            }, checkDelayMs);
         }
 
         async function apiFetch(url, options = {}) {
@@ -63,8 +192,8 @@
             if (token && options.headers) {
                 if (!options.headers.Authorization) options.headers['Authorization'] = `Bearer ${token}`;
             }
-            let resp = await fetch(url, options);
-            if (resp.status === 401 && token) {
+            let resp = await _originalFetch(url, options);
+            if (resp.status === 401 && (token || localStorage.getItem('refresh_token'))) {
                 // Attempt refresh
                 if (!_refreshingToken) {
                     _refreshingToken = true;
@@ -77,36 +206,43 @@
                         // Retry original request with new token
                         if (!options.headers) options.headers = {};
                         options.headers['Authorization'] = `Bearer ${localStorage.getItem('auth_token')}`;
-                        resp = await fetch(url, options);
+                        resp = await _originalFetch(url, options);
                     } else {
-                        // Refresh failed — force logout
-                        showCustomAlert('Session expired. Please log in again.', 'Session Expired').then(() => {
-                            window.isLoggingOut = true;
-                            authToken = null;
-                            localStorage.removeItem('auth_token');
-                            localStorage.removeItem('refresh_token');
-                            localStorage.removeItem('current_user');
-                            document.getElementById('chatInterface').style.display = 'none';
-                            document.getElementById('loginScreen').style.display = 'flex';
-                            setTimeout(() => { window.isLoggingOut = false; }, 500);
-                        });
+                        // Refresh failed — only force logout if the user was actively logged in
+                        if (authToken || localStorage.getItem('auth_token')) {
+                            showCustomAlert('Your session has expired. Please sign in again.', 'Session Expired').then(() => {
+                                window.isLoggingOut = true;
+                                authToken = null;
+                                localStorage.removeItem('auth_token');
+                                localStorage.removeItem('refresh_token');
+                                localStorage.removeItem('current_user');
+                                if (_tokenRefreshTimer) clearTimeout(_tokenRefreshTimer);
+                                document.getElementById('chatInterface').style.display = 'none';
+                                document.getElementById('loginScreen').style.display = 'flex';
+                                setTimeout(() => { window.isLoggingOut = false; }, 500);
+                            });
+                        }
                     }
                 } else {
                     // Another refresh is in progress — wait for it
                     await new Promise(resolve => _refreshQueue.push(resolve));
                     if (!options.headers) options.headers = {};
                     options.headers['Authorization'] = `Bearer ${localStorage.getItem('auth_token')}`;
-                    resp = await fetch(url, options);
+                    resp = await _originalFetch(url, options);
                 }
             }
             return resp;
         }
 
-        // Monkey-patch original fetch so all existing code benefits
-        const _originalFetch = window.fetch;
+        // Monkey-patch original fetch to automatically intercept and protect all API calls
         window.fetch = function(url, options) {
-            // Only intercept requests to our API
-            if (typeof url === 'string' && url.includes(window.location.host)) {
+            const isApi = typeof url === 'string' && (
+                url.includes(window.location.host) ||
+                url.startsWith('/api') ||
+                url.startsWith('api/') ||
+                url.includes('/api/')
+            );
+            if (isApi) {
                 return apiFetch(url, options);
             }
             return _originalFetch.call(window, url, options);
@@ -114,6 +250,9 @@
 
         window.apiFetch = apiFetch;
         window._doRefreshToken = _doRefreshToken;
+        window.parseJwtPayload = parseJwtPayload;
+        window.isTokenExpiringSoon = isTokenExpiringSoon;
+        window.scheduleProactiveTokenRefresh = scheduleProactiveTokenRefresh;
 
         window.isLoggingOut = false;
 
@@ -407,13 +546,16 @@
             const text = document.getElementById('authBtnText');
             const loader = document.getElementById('authBtnLoading');
 
-            // ✅ CRITICAL: Don't disable the button, just show loading
-            btn.style.opacity = loading ? '0.6' : '1';
-            btn.style.cursor = loading ? 'not-allowed' : 'pointer';
-            // DON'T SET: btn.disabled = loading; ← THIS WAS BLOCKING CLICKS
+            if (btn) {
+                btn.style.opacity = loading ? '0.6' : '1';
+                btn.style.cursor = loading ? 'not-allowed' : 'pointer';
+                if (!loading) {
+                    btn.dataset.submitting = 'false';
+                }
+            }
 
-            text.style.display = loading ? 'none' : 'inline';
-            loader.style.display = loading ? 'inline-block' : 'none';
+            if (text) text.style.display = loading ? 'none' : 'inline';
+            if (loader) loader.style.display = loading ? 'inline-block' : 'none';
         }
         function showError(message) {
         console.error('Error:', message);
@@ -445,6 +587,140 @@
         }
 
         // ===========================================================
+        // APP STORAGE - IndexedDB Client-Side Persistence
+        // Caches chats, messages, and contacts for instant zero-latency loading
+        // ===========================================================
+        const AppStorage = {
+            dbName: 'DecentralChatDB',
+            dbVersion: 1,
+            _db: null,
+
+            async open() {
+                if (this._db) return this._db;
+                if (!window.indexedDB) {
+                    console.warn('⚠️ IndexedDB not supported; using memory storage.');
+                    return null;
+                }
+                return new Promise((resolve) => {
+                    try {
+                        const req = window.indexedDB.open(this.dbName, this.dbVersion);
+                        req.onupgradeneeded = (e) => {
+                            const db = e.target.result;
+                            if (!db.objectStoreNames.contains('chats')) {
+                                db.createObjectStore('chats', { keyPath: 'id' });
+                            }
+                            if (!db.objectStoreNames.contains('messages')) {
+                                const msgStore = db.createObjectStore('messages', { keyPath: 'id' });
+                                msgStore.createIndex('chat_id', 'chat_id', { unique: false });
+                            }
+                            if (!db.objectStoreNames.contains('contacts')) {
+                                db.createObjectStore('contacts', { keyPath: 'id' });
+                            }
+                        };
+                        req.onsuccess = (e) => {
+                            this._db = e.target.result;
+                            resolve(this._db);
+                        };
+                        req.onerror = () => {
+                            console.warn('⚠️ IndexedDB open error');
+                            resolve(null);
+                        };
+                    } catch (e) {
+                        console.warn('⚠️ IndexedDB exception:', e);
+                        resolve(null);
+                    }
+                });
+            },
+
+            async getChats() {
+                const db = await this.open();
+                if (!db) return [];
+                return new Promise((resolve) => {
+                    try {
+                        const tx = db.transaction('chats', 'readonly');
+                        const store = tx.objectStore('chats');
+                        const req = store.getAll();
+                        req.onsuccess = () => resolve(req.result || []);
+                        req.onerror = () => resolve([]);
+                    } catch {
+                        resolve([]);
+                    }
+                });
+            },
+
+            async saveChats(chatsList) {
+                if (!Array.isArray(chatsList)) return;
+                const db = await this.open();
+                if (!db) return;
+                try {
+                    const tx = db.transaction('chats', 'readwrite');
+                    const store = tx.objectStore('chats');
+                    for (const c of chatsList) {
+                        if (c && c.id) store.put(c);
+                    }
+                } catch (e) {
+                    console.warn('⚠️ saveChats error:', e);
+                }
+            },
+
+            async getMessages(chatId) {
+                const db = await this.open();
+                if (!db) return [];
+                return new Promise((resolve) => {
+                    try {
+                        const tx = db.transaction('messages', 'readonly');
+                        const store = tx.objectStore('messages');
+                        const index = store.index('chat_id');
+                        const req = index.getAll(chatId);
+                        req.onsuccess = () => resolve(req.result || []);
+                        req.onerror = () => resolve([]);
+                    } catch {
+                        resolve([]);
+                    }
+                });
+            },
+
+            async saveMessages(chatId, messagesList) {
+                if (!Array.isArray(messagesList)) return;
+                const db = await this.open();
+                if (!db) return;
+                try {
+                    const tx = db.transaction('messages', 'readwrite');
+                    const store = tx.objectStore('messages');
+                    for (const m of messagesList) {
+                        if (m && m.id) {
+                            const copy = Object.assign({}, m, { chat_id: chatId });
+                            store.put(copy);
+                        }
+                    }
+                } catch (e) {
+                    console.warn('⚠️ saveMessages error:', e);
+                }
+            }
+        };
+
+        // Cross-tab WebRTC call synchronization channel (prevents multi-tab glare & duplicate ringing)
+        const callSyncChannel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('decentral_call_sync') : null;
+        if (callSyncChannel) {
+            callSyncChannel.onmessage = (event) => {
+                const msg = event.data;
+                if (!msg) return;
+                if (msg.type === 'call_answered_elsewhere' && currentCall && currentCall.id === msg.callId) {
+                    console.log('📞 Call answered in another tab. Dismissing incoming overlay on this tab.');
+                    if (typeof stopRingtone === 'function') stopRingtone();
+                    const overlay = document.getElementById('callOverlay');
+                    if (overlay) overlay.classList.remove('active');
+                    currentCall = null;
+                } else if (msg.type === 'call_ended_elsewhere' && currentCall && currentCall.id === msg.callId) {
+                    console.log('📞 Call ended in another tab.');
+                    if (typeof stopRingtone === 'function') stopRingtone();
+                    if (typeof closeCallOverlay === 'function') closeCallOverlay();
+                    currentCall = null;
+                }
+            };
+        }
+
+        // ===========================================================
         // E2E ENCRYPTION ENGINE - Web Crypto API (ECDH + AES-GCM)
         // Provides end-to-end encrypted messaging and file transfer
         // ===========================================================
@@ -453,6 +729,21 @@
             chatKeys: new Map(),    // chatId -> CryptoKey (AES-GCM shared key)
             _ready: false,
             storeKeyName: CHAT_KEY_STORE,
+
+            // ---------- Helper: check if string looks like an encrypted ciphertext payload ----------
+            isEncryptedPayload(text) {
+                if (!text || typeof text !== 'string') return false;
+                // Ciphertext has 12 bytes IV + at least 16 bytes auth tag + 1 byte data = 29 bytes minimum => base64 >= 38 chars
+                if (text.length < 32) return false;
+                if (/\s/.test(text)) return false;
+                if (!/^[A-Za-z0-9+/]+={0,2}$/.test(text)) return false;
+                try {
+                    const raw = atob(text);
+                    return raw.length >= 28;
+                } catch {
+                    return false;
+                }
+            },
 
             // ---------- Initialization ----------
             async init() {
@@ -730,8 +1021,13 @@
                     ? currentUser.avatar_url
                     : API_URL + currentUser.avatar_url;
                 document.getElementById('userAvatar').innerHTML = `<img src="${avatarUrl}" alt="Avatar">`;
+                const navAvatar = document.getElementById('navRailAvatar');
+                if (navAvatar) navAvatar.innerHTML = `<img src="${avatarUrl}" alt="Avatar">`;
             } else {
-                document.getElementById('userAvatar').textContent = currentUser.username[0].toUpperCase();
+                const initial = currentUser.username[0].toUpperCase();
+                document.getElementById('userAvatar').textContent = initial;
+                const navAvatar = document.getElementById('navRailAvatar');
+                if (navAvatar) navAvatar.textContent = initial;
             }
 
             await requestNotificationPermission();
@@ -800,7 +1096,12 @@
 
                 // Clear storage
                 localStorage.removeItem('auth_token');
+                localStorage.removeItem('refresh_token');
                 localStorage.removeItem('current_user');
+                if (_tokenRefreshTimer) {
+                    clearTimeout(_tokenRefreshTimer);
+                    _tokenRefreshTimer = null;
+                }
 
                 // ✅ CRITICAL FIX: Reset the form mode to login
                 isLoginMode = true;
@@ -929,21 +1230,34 @@
                     ws = null;
                     updateConnectionStatus(false);
 
-                    // Check if connection was refused due to authentication (code 1008 = policy violation)
-                    if (event.code === 1008 || event.code === 1011) {
-                        console.warn('⚠️ Authentication failed - token may be expired');
-                        showCustomAlert(
-                            'Your session has expired. Please log in again.',
-                            'Session Expired'
-                        ).then(() => {
-                            // Force logout
-                            window.isLoggingOut = true;
-                            authToken = null;
-                            localStorage.removeItem('auth_token');
-                            localStorage.removeItem('current_user');
-                            document.getElementById('chatInterface').style.display = 'none';
-                            document.getElementById('loginScreen').style.display = 'flex';
-                            setTimeout(() => { window.isLoggingOut = false; }, 500);
+                    // Check if connection was refused due to authentication (code 4001 = token expired, 1008/1011 = auth policy)
+                    if (event.code === 4001 || event.code === 1008 || event.code === 1011) {
+                        console.warn('⚠️ WebSocket auth issue (code ' + event.code + '). Attempting session renewal...');
+                        _doRefreshToken().then(ok => {
+                            if (ok && !window.isLoggingOut) {
+                                console.log('✅ Session renewed, reconnecting WebSocket...');
+                                wsReconnectAttempts = 0;
+                                connectWebSocket();
+                            } else {
+                                showCustomAlert(
+                                    'Your session has expired. Please log in again.',
+                                    'Session Expired'
+                                ).then(() => {
+                                    // Force logout
+                                    window.isLoggingOut = true;
+                                    authToken = null;
+                                    localStorage.removeItem('auth_token');
+                                    localStorage.removeItem('refresh_token');
+                                    localStorage.removeItem('current_user');
+                                    if (_tokenRefreshTimer) {
+                                        clearTimeout(_tokenRefreshTimer);
+                                        _tokenRefreshTimer = null;
+                                    }
+                                    document.getElementById('chatInterface').style.display = 'none';
+                                    document.getElementById('loginScreen').style.display = 'flex';
+                                    setTimeout(() => { window.isLoggingOut = false; }, 500);
+                                });
+                            }
                         });
                         return;
                     }
@@ -1090,7 +1404,25 @@
                     handleMessageDeleted(data);
                     break;
 
+                case 'token_expired':
+                    console.warn('⚠️ WebSocket received token_expired. Renewing session in background...');
+                    _doRefreshToken().then(ok => {
+                        if (ok && ws && ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({ type: 'auth', token: authToken }));
+                        }
+                    });
+                    break;
+
                 case 'error':
+                    if (data.message && data.message.toLowerCase().includes('token expired')) {
+                        console.warn('⚠️ WebSocket token expired error. Renewing session in background...');
+                        _doRefreshToken().then(ok => {
+                            if (ok && ws && ws.readyState === WebSocket.OPEN) {
+                                ws.send(JSON.stringify({ type: 'auth', token: authToken }));
+                            }
+                        });
+                        break;
+                    }
                     console.error('Server error:', data.message);
                     showNotification('Error', data.message);
                     break;
@@ -1315,7 +1647,6 @@
                     contacts.forEach(contact => {
                         const contactEl = document.createElement('div');
                         contactEl.className = 'user-item';
-                        contactEl.style.cssText = 'display: flex; align-items: center; gap: 15px; padding: 15px; background: rgba(0,0,0,0.4); border: 1px solid rgba(218,165,32,0.2); border-radius: 10px; margin-bottom: 10px; transition: all 0.3s;';
 
                         // Handle avatar properly
                         let avatarContent;
@@ -1329,19 +1660,18 @@
                         }
 
                         contactEl.innerHTML = `
-                            <div class="avatar" style="width: 50px; height: 50px; font-size: 24px; flex-shrink: 0;">${avatarContent}</div>
+                            <div class="avatar" style="width: 44px; height: 44px; font-size: 18px; border-radius: 14px; flex-shrink: 0;">${avatarContent}</div>
                             <div style="flex: 1; min-width: 0;">
-                                <div style="font-weight: 600; font-size: 16px; margin-bottom: 3px;">${escapeHtml(contact.username)}</div>
-                                <div style="font-size: 12px; color: #888;">
+                                <div style="font-weight: 600; font-size: 15px; margin-bottom: 2px; color: var(--text-primary);">${escapeHtml(contact.username)}</div>
+                                <div style="font-size: 12px; color: var(--text-secondary);">
                                     ${contact.status === 'online' ? '🟢 Online' : '⚫ Offline'}
                                     ${contact.email ? ` • ${escapeHtml(contact.email)}` : ''}
                                 </div>
                             </div>
                             <button 
                                 onclick="removeContact('${contact.id}')" 
-                                style="background: rgba(229, 72, 77,0.2); border: 1px solid rgba(229, 72, 77,0.4); color: #E5484D; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.3s; flex-shrink: 0;"
-                                onmouseover="this.style.background='rgba(229, 72, 77,0.3)'"
-                                onmouseout="this.style.background='rgba(229, 72, 77,0.2)'"
+                                class="action-btn"
+                                style="background: rgba(229, 72, 77, 0.15); border: 1px solid rgba(229, 72, 77, 0.35); color: #F0787C; padding: 6px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; flex-shrink: 0;"
                             >
                                 Remove
                             </button>
@@ -1413,6 +1743,24 @@
             }
         }
 
+        function isLikelyBinaryCiphertext(str) {
+            if (!str || typeof str !== 'string' || str.length < 24) return false;
+            if (/\s/.test(str)) return false;
+            if (!/^[A-Za-z0-9+/]+={0,2}$/.test(str)) return false;
+            try {
+                const decoded = atob(str);
+                if (decoded.length < 20) return false;
+                let nonPrintable = 0;
+                for (let i = 0; i < decoded.length; i++) {
+                    const c = decoded.charCodeAt(i);
+                    if ((c < 32 && c !== 9 && c !== 10 && c !== 13) || c > 126) nonPrintable++;
+                }
+                return (nonPrintable / decoded.length) > 0.25;
+            } catch {
+                return false;
+            }
+        }
+
         // ========== Chats ==========
 
         /**
@@ -1453,8 +1801,8 @@
                     // If decryption fails, show the raw message
                     console.warn('Preview decrypt failed for chat', chat.id, error);
                 }
-            } else if (displayText.length > 30 && /^[A-Za-z0-9+/=]+$/.test(displayText)) {
-                // No key available but looks like encrypted data
+            } else if (displayText.length > 30 && isLikelyBinaryCiphertext(displayText)) {
+                // True ciphertext payload with no key loaded yet
                 displayText = '🔒 Encrypted message';
             }
 
@@ -1469,8 +1817,25 @@
         async function loadChats() {
             const container = document.getElementById('contactsList');
 
-            // Show loading
-            container.innerHTML = '<div style="padding: 20px; text-align: center;"><div class="loading"></div><p style="margin-top: 10px; color: #888;">Loading chats...</p></div>';
+            // 1️⃣ Instant cache rendering: If cached chats exist in IndexedDB, render immediately with 0ms delay!
+            try {
+                if (typeof AppStorage !== 'undefined') {
+                    const cached = await AppStorage.getChats();
+                    if (cached && cached.length > 0 && (!chats || chats.length === 0)) {
+                        chats = cached;
+                        window.chats = cached;
+                        console.log('⚡ Rendered cached chats from IndexedDB:', cached.length);
+                        await renderChats();
+                    }
+                }
+            } catch (cacheErr) {
+                console.warn('⚠️ Cache load warning:', cacheErr);
+            }
+
+            // Show loading placeholder ONLY if no chats are rendered yet
+            if (!chats || chats.length === 0) {
+                container.innerHTML = '<div style="padding: 20px; text-align: center;"><div class="loading"></div><p style="margin-top: 10px; color: #888;">Loading chats...</p></div>';
+            }
 
             try {
                 console.log('📡 Fetching chats from server...');
@@ -1484,9 +1849,24 @@
                 }
 
                 const data = await response.json();
-                chats = data.chats || [];
+
+                if (data && Array.isArray(data.chats)) {
+                    chats = data.chats;
+                    window.chats = chats;
+                } else if (Array.isArray(data)) {
+                    chats = data;
+                    window.chats = chats;
+                } else if (!window.chats || window.chats.length === 0) {
+                    chats = [];
+                    window.chats = [];
+                }
 
                 console.log('💬 Loaded chats:', chats.length);
+
+                // Save to IndexedDB cache
+                if (typeof AppStorage !== 'undefined') {
+                    AppStorage.saveChats(chats).catch(() => {});
+                }
 
                 if (chats.length > 0) {
                     console.log('📋 Chat list:', chats.map(c => ({
@@ -1498,7 +1878,7 @@
                 }
 
                 // 🔒 Proactively set up encryption keys for all direct chats
-                if (CryptoEngine._ready) {
+                if (typeof CryptoEngine !== 'undefined' && CryptoEngine._ready) {
                     chats.forEach(chat => {
                         if (chat.type === 'direct' && chat.other_user_id && !CryptoEngine.hasKey(chat.id)) {
                             CryptoEngine.setupChatKey(chat.id, chat.other_user_id).catch(() => { });
@@ -1508,74 +1888,170 @@
                     });
                 }
 
-                renderChats();
+                await renderChats();
 
             } catch (error) {
                 console.error('❌ Load chats error:', error);
-                showError('Failed to load chats: ' + error.message);
-                container.innerHTML = '<div style="padding: 20px; text-align: center; color: #F0787C;">Failed to load chats</div>';
-                // Show empty state
-                chats = [];
-                renderChats();
+                // If we already have chats displayed from cache, don't blank the UI!
+                if (!chats || chats.length === 0) {
+                    showError('Failed to load chats: ' + error.message);
+                    container.innerHTML = '<div style="padding: 20px; text-align: center; color: #F0787C;">Failed to load chats</div>';
+                    chats = [];
+                    renderChats();
+                } else {
+                    if (typeof showToast === 'function') {
+                        showToast('Working offline (showing cached chats)', 'info');
+                    }
+                }
             }
+        }
+
+        function formatChatTime(dateStr) {
+            if (!dateStr) return '';
+            try {
+                const d = new Date(dateStr);
+                if (isNaN(d.getTime())) return '';
+                const now = new Date();
+                const isToday = d.toDateString() === now.toDateString();
+                const yesterday = new Date(now);
+                yesterday.setDate(yesterday.getDate() - 1);
+                const isYesterday = d.toDateString() === yesterday.toDateString();
+                const timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).toLowerCase();
+                if (isToday) return `Today, ${timeStr}`;
+                if (isYesterday) return `Yesterday, ${timeStr}`;
+                return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+            } catch {
+                return '';
+            }
+        }
+
+        async function createChatCardElement(chat) {
+            const chatEl = document.createElement('div');
+            chatEl.className = 'contact-item' + (activeChat?.id === chat.id ? ' active' : '');
+            chatEl.onclick = () => selectChat(chat);
+
+            let avatarContent;
+            if (chat.avatar_url) {
+                const avatarUrl = chat.avatar_url.startsWith('http')
+                    ? chat.avatar_url
+                    : (chat.avatar_url.startsWith('/api')
+                        ? `${window.location.origin}${chat.avatar_url}`
+                        : `${API_URL}${chat.avatar_url.startsWith('/') ? '' : '/'}${chat.avatar_url}`);
+                avatarContent = `<img src="${avatarUrl}" alt="${(chat.name || 'Chat').replace(/"/g, '&quot;')}" onerror="this.parentElement.innerHTML='${((chat.name || '?')[0] || '?').toUpperCase()}'">`;
+            } else {
+                avatarContent = chat.name ? chat.name[0].toUpperCase() : (chat.type === 'group' ? '👥' : '?');
+            }
+
+            let formattedLastMessage = '';
+            try {
+                formattedLastMessage = await formatLastMessagePreview(chat);
+            } catch (err) {
+                formattedLastMessage = chat.last_message || '';
+            }
+
+            const formattedTime = formatChatTime(chat.last_message_time);
+            const chatName = chat.name || (chat.type === 'group' ? 'Unnamed Group' : 'User');
+
+            chatEl.innerHTML = `
+                <div class="contact-avatar">
+                    ${avatarContent}
+                    ${chat.status ? `<div class="status-indicator ${chat.status}"></div>` : ''}
+                </div>
+                <div class="contact-info">
+                    <div class="contact-header-row">
+                        <span class="contact-name">${typeof escapeHtml === 'function' ? escapeHtml(chatName) : chatName}</span>
+                        <span class="contact-time">${formattedTime}</span>
+                    </div>
+                    <div class="contact-preview-row">
+                        <span class="contact-last-message">${typeof escapeHtml === 'function' ? escapeHtml(formattedLastMessage) : formattedLastMessage}</span>
+                        ${chat.unread_count > 0 ? `<div class="unread-badge">${chat.unread_count}</div>` : ''}
+                    </div>
+                </div>
+            `;
+            return chatEl;
         }
 
         async function renderChats() {
             const container = document.getElementById('contactsList');
             container.innerHTML = '';
 
-            console.log('🎨 Rendering', chats.length, 'chats');
+            const chatSource = (window.chats && window.chats.length > 0) ? window.chats : chats;
+            chats = chatSource;
+            console.log('🎨 Rendering', chatSource.length, 'chats');
 
-            if (chats.length === 0) {
+            if (chatSource.length === 0) {
                 container.innerHTML = `
-                    <div style="padding: 40px 20px; text-align: center; color: #888;">
+                    <div style="padding: 40px 20px; text-align: center; color: var(--text-muted);">
                         <p style="font-size: 40px; margin-bottom: 10px;">💬</p>
-                        <p>No chats yet</p>
-                        <p style="font-size: 12px; margin-top: 5px;">Add a contact to start chatting</p>
+                        <p style="font-size: 15px; font-weight: 600; color: var(--text-primary);">No chats yet</p>
+                        <p style="font-size: 12.5px; margin-top: 5px;">Add a contact to start chatting</p>
                     </div>
                 `;
                 return;
             }
 
-            // Render all chats with formatted last messages
-            for (const [index, chat] of chats.entries()) {
-                try {
-                    const chatEl = document.createElement('div');
-                    chatEl.className = 'contact-item' + (activeChat?.id === chat.id ? ' active' : '');
-                    chatEl.onclick = () => selectChat(chat);
+            const filter = window.currentChatFilter || 'all';
+            let displayChats = chatSource;
+            if (filter === 'direct') {
+                displayChats = chatSource.filter(c => c.type === 'direct');
+            } else if (filter === 'group') {
+                displayChats = chatSource.filter(c => c.type === 'group');
+            } else if (filter === 'unread') {
+                displayChats = chatSource.filter(c => (c.unread_count || 0) > 0);
+            }
 
-                    // ✅ FIX: Handle avatar URL properly
-                    let avatarContent;
-                    if (chat.avatar_url) {
-                        // Check if it's a full URL (Google avatar) or relative path
-                        const avatarUrl = chat.avatar_url.startsWith('http')
-                            ? chat.avatar_url
-                            : `${API_URL}${chat.avatar_url}`;
-                        avatarContent = `<img src="${avatarUrl}" alt="${chat.name}" onerror="this.parentElement.innerHTML='${(chat.name || '?')[0].toUpperCase()}'">`;
-                    } else {
-                        avatarContent = chat.name ? chat.name[0].toUpperCase() : '?';
+            if (displayChats.length === 0) {
+                container.innerHTML = `
+                    <div style="padding: 30px 20px; text-align: center; color: var(--text-muted);">
+                        <p style="font-size: 14px;">No ${filter} chats found</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const groups = displayChats.filter(c => c.type === 'group');
+            const persons = displayChats.filter(c => c.type !== 'group');
+
+            // Render Groups section if groups exist
+            if (groups.length > 0 && filter === 'all') {
+                const grpHeader = document.createElement('div');
+                grpHeader.className = 'contact-section-title';
+                grpHeader.textContent = 'Groups';
+                container.appendChild(grpHeader);
+
+                for (const chat of groups) {
+                    try {
+                        const el = await createChatCardElement(chat);
+                        container.appendChild(el);
+                    } catch (e) {
+                        console.error('Error rendering group chat:', e);
                     }
+                }
+            }
 
-                    // Format the last message (decrypt if needed)
-                    const formattedLastMessage = await formatLastMessagePreview(chat);
+            // Render Person section
+            if (persons.length > 0 && filter === 'all') {
+                const pHeader = document.createElement('div');
+                pHeader.className = 'contact-section-title';
+                pHeader.textContent = 'Person';
+                container.appendChild(pHeader);
 
-                    chatEl.innerHTML = `
-                        <div class="contact-avatar">
-                            ${avatarContent}
-                            ${chat.status ? `<div class="status-indicator ${chat.status}"></div>` : ''}
-                        </div>
-                        <div class="contact-info">
-                            <div class="contact-name">${escapeHtml(chat.name || 'Unknown')}</div>
-                            <div class="contact-last-message">${escapeHtml(formattedLastMessage)}</div>
-                        </div>
-                        ${chat.unread_count > 0 ? `<div class="unread-badge">${chat.unread_count}</div>` : ''}
-                    `;
-
-                    container.appendChild(chatEl);
-                    console.log(`✅ Rendered chat ${index + 1}:`, chat.name);
-
-                } catch (error) {
-                    console.error('❌ Error rendering chat:', chat.id, error);
+                for (const chat of persons) {
+                    try {
+                        const el = await createChatCardElement(chat);
+                        container.appendChild(el);
+                    } catch (e) {
+                        console.error('Error rendering person chat:', e);
+                    }
+                }
+            } else if (filter !== 'all') {
+                for (const chat of displayChats) {
+                    try {
+                        const el = await createChatCardElement(chat);
+                        container.appendChild(el);
+                    } catch (e) {
+                        console.error('Error rendering chat item:', e);
+                    }
                 }
             }
         }
@@ -1681,7 +2157,7 @@
             document.getElementById('activeChat').style.display = 'flex';
 
             document.getElementById('activeChatName').textContent = chat.name || 'Unknown';
-            document.getElementById('activeChatStatus').textContent = chat.status || 'offline';
+            updateActiveChatStatusUI(chat.status, chat.last_seen);
 
             const _chatAvatarUrl = chat.avatar_url
                 ? (chat.avatar_url.startsWith('http') ? chat.avatar_url : `${API_URL}${chat.avatar_url}`)
@@ -1695,9 +2171,12 @@
             renderChats();
             
             // 🔒 Set up E2E encryption key for this chat BEFORE loading messages
-            if (CryptoEngine._ready && chat.type === 'direct' && chat.other_user_id) {
+            if (!CryptoEngine._ready) {
+                await CryptoEngine.init().catch(e => console.warn(e));
+            }
+            if (chat.type === 'direct' && chat.other_user_id) {
                 await CryptoEngine.setupChatKey(chat.id, chat.other_user_id).catch(e => console.warn(e));
-            } else if (CryptoEngine._ready && chat.type === 'group' && chat.member_ids) {
+            } else if (chat.type === 'group' && chat.member_ids) {
                 await CryptoEngine.setupGroupChatKey(chat.id, chat.member_ids).catch(e => console.warn(e));
             }
 
@@ -1794,18 +2273,30 @@
         // ========== Group Chats ==========
 
         async function openCreateGroup() {
+            await loadContacts();
             await loadContactsForGroup();
             document.getElementById('createGroupModal').classList.add('active');
         }
 
         async function loadContactsForGroup() {
-            const container = document.getElementById('groupMembersList');
-            container.innerHTML = `
-                <div style="text-align: center; color: #888; padding: 40px;">
-                    <p style="font-size: 40px; margin-bottom: 10px;">💡</p>
-                    <p>Search users above to add members</p>
-                </div>
-            `;
+            const container = document.getElementById('createGroupMembersList') || document.getElementById('groupMembersList');
+            if (!container) return;
+            if (!contacts || contacts.length === 0) {
+                container.innerHTML = `
+                    <div style="text-align: center; color: var(--text-muted); padding: 24px;">
+                        <p style="font-size: 32px; margin-bottom: 8px;">👥</p>
+                        <p style="font-size: 13.5px;">No contacts found yet. Add contacts to select members!</p>
+                    </div>
+                `;
+                return;
+            }
+            container.innerHTML = contacts.map(c => `
+                <label class="group-member-checkbox-item">
+                    <input type="checkbox" value="${c.id || c.user_id}">
+                    <div class="avatar" style="width: 34px; height: 34px; font-size: 14px; border-radius: 10px;">${c.avatar_url ? `<img src="${c.avatar_url.startsWith('http') ? c.avatar_url : API_URL + c.avatar_url}" style="width: 100%; height: 100%; object-fit: cover; border-radius: 10px;">` : (c.username ? c.username.charAt(0).toUpperCase() : '👤')}</div>
+                    <span style="font-size: 14px; font-weight: 500;">${escapeHtml(c.username || c.email)}</span>
+                </label>
+            `).join('');
         }
 
         async function createGroup() {
@@ -1818,7 +2309,7 @@
             }
 
             const selectedMembers = [];
-            document.querySelectorAll('#groupMembersList input[type="checkbox"]:checked').forEach(checkbox => {
+            document.querySelectorAll('#createGroupMembersList input[type="checkbox"]:checked, #groupMembersList input[type="checkbox"]:checked').forEach(checkbox => {
                 selectedMembers.push(checkbox.value);
             });
 
@@ -1870,6 +2361,19 @@
                 window.messagesOffset = 0;
                 window.hasMoreMessages = true;
 
+                // 1️⃣ Instant cache rendering from IndexedDB
+                if (typeof AppStorage !== 'undefined') {
+                    try {
+                        const cachedMsgs = await AppStorage.getMessages(chatId);
+                        if (cachedMsgs && cachedMsgs.length > 0) {
+                            console.log('⚡ Rendered cached messages:', cachedMsgs.length);
+                            renderMessages(cachedMsgs);
+                        }
+                    } catch (e) {
+                        console.warn('⚠️ Cached messages warning:', e);
+                    }
+                }
+
                 const response = await fetch(API_URL + `/chats/${chatId}/messages?limit=20`, {
                     headers: { 'Authorization': `Bearer ${authToken}` }
                 });
@@ -1879,11 +2383,16 @@
                 console.log('📬 Loaded messages:', messages.length);
                 renderMessages(messages);
 
+                // Cache fresh messages in IndexedDB
+                if (typeof AppStorage !== 'undefined') {
+                    AppStorage.saveMessages(chatId, messages).catch(() => {});
+                }
+
                 window.messagesOffset = messages.length;
                 if (messages.length < 20) window.hasMoreMessages = false;
 
                 // Send read receipts
-                const messageIds = messages.filter(m => m.sender.id !== currentUser.id).map(m => m.id);
+                const messageIds = messages.filter(m => m.sender && m.sender.id !== currentUser?.id).map(m => m.id);
                 if (messageIds.length > 0 && ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({
                         type: 'read_receipt',
@@ -1945,7 +2454,7 @@
             const container = document.getElementById('messagesContainer');
             container.innerHTML = '';
 
-            if (messages.length === 0) {
+            if (!messages || messages.length === 0) {
                 container.innerHTML = `
                     <div style="text-align: center; color: #888; padding: 40px;">
                         <p style="font-size: 40px; margin-bottom: 10px;">💬</p>
@@ -1956,7 +2465,15 @@
                 return;
             }
 
-            messages.forEach(message => {
+            const seen = new Set();
+            const uniqueMessages = messages.filter(m => {
+                if (!m || !m.id) return false;
+                if (seen.has(m.id)) return false;
+                seen.add(m.id);
+                return true;
+            });
+
+            uniqueMessages.forEach(message => {
                 const messageEl = createMessageElement(message);
                 container.appendChild(messageEl);
             });
@@ -1967,7 +2484,16 @@
 
         function createMessageElement(message) {
             const messageEl = document.createElement('div');
-            const isSent = message.sender.id === currentUser.id;
+            const senderId = message.sender?.id || message.sender_id || (typeof message.sender === 'string' ? message.sender : null);
+            const senderName = message.sender?.username || (typeof message.sender === 'string' ? message.sender : null);
+            const currentUserId = currentUser?.id;
+            const currentUserName = currentUser?.username;
+            const isSent = (currentUserId && senderId && String(senderId) === String(currentUserId)) ||
+                           (currentUserName && senderName && senderName.toLowerCase() === currentUserName.toLowerCase()) ||
+                           senderName === 'Me' ||
+                           senderId === 'me' ||
+                           message.isSent === true ||
+                           message.is_sent === true;
             messageEl.className = 'message' + (isSent ? ' sent' : '');
             messageEl.dataset.messageId = message.id;
             messageEl.id = `msg-${message.id}`;
@@ -2041,9 +2567,11 @@
                                 class="chat-thumb-img"
                                 loading="lazy"
                                 decoding="async"
-                                onclick="openImageViewer('${imageUrl}', '${escapeHtml(att.filename || 'Image')}')"
+                                data-url="${escapeHtml(imageUrl)}"
+                                data-filename="${escapeHtml(att.filename || 'Image')}"
+                                onclick="openImageViewer(this.dataset.url, this.dataset.filename)"
                                 style="cursor:pointer;max-width:300px;max-height:300px;border-radius:8px;"
-                                onerror="this.parentElement.innerHTML='<div style=\\'padding:10px;background:rgba(229, 72, 77,0.1);border-radius:8px;color:#F0787C;text-align:center\\'>❌ Image not available<br><small style=\\'color:#888\\'>${escapeHtml(att.filename || 'Unknown')}</small></div>'"
+                                onerror="this.parentElement.innerHTML='<div style=\\'padding:10px;background:rgba(229, 72, 77,0.1);border-radius:8px;color:#F0787C;text-align:center\\'>❌ Image not available</div>'"
                             >
                             </div>
                         `;
@@ -2096,13 +2624,13 @@
                         attachmentsHtml += `
                             <div class="message-attachment" style="cursor:pointer;">
                                 <div class="attachment-icon">${_isEnc ? '🔒' : icon}</div>
-                                <div class="attachment-info">
+                                <div class="attachment-info" style="min-width:0;flex:1;overflow:hidden;">
                                     <div class="attachment-name" title="${escapeHtml(att.filename || 'File')}">${escapeHtml(att.filename || 'File')}</div>
                                     <div class="attachment-size">${fileSize}${_isEnc ? ' · Encrypted' : ''}</div>
                                 </div>
                                 ${_isEnc
-                                ? `<button onclick="decryptAndDownload('${fileUrl}','${escapeHtml(att.filename || 'file')}','${att.id}')" style="margin-left:8px;background:rgba(76, 175, 125,0.15);border:1px solid rgba(76, 175, 125,0.3);border-radius:8px;color:#4CB78A;font-size:12px;font-weight:700;padding:6px 12px;cursor:pointer;white-space:nowrap;">🔓 Decrypt</button>`
-                                : `<button onclick="window.open('${fileUrl}','_blank')" style="margin-left:8px;background:rgba(190, 91, 46,0.12);border:1px solid rgba(190, 91, 46,0.2);border-radius:8px;color:#C97A3D;font-size:12px;font-weight:700;padding:6px 12px;cursor:pointer;white-space:nowrap;">⬇ Download</button>`
+                                ? `<button class="attachment-action-btn decrypt-btn" data-file-url="${escapeHtml(fileUrl)}" data-filename="${escapeHtml(att.filename || 'file')}" data-att-id="${escapeHtml(att.id)}" onclick="decryptAndDownload(this.dataset.fileUrl, this.dataset.filename, this.dataset.attId)">🔓 Decrypt</button>`
+                                : `<button class="attachment-action-btn download-btn" data-file-url="${escapeHtml(fileUrl)}" onclick="window.open(this.dataset.fileUrl,'_blank')">⬇ Download</button>`
                             }
                             </div>
                         `;
@@ -2113,23 +2641,27 @@
             }
 
             // ✅ BUILD COMPLETE MESSAGE HTML WITH REPLY
-            // For E2E encrypted messages, render placeholder then async-decrypt
-            const _isEncrypted = message.encrypted === true;
+            // Determine whether the content is actual ciphertext or plaintext
+            const hasRawContent = Boolean(message.content);
+            const isCiphertext = hasRawContent && CryptoEngine.isEncryptedPayload(message.content) && isLikelyBinaryCiphertext(message.content);
+            const isEncryptedFlag = message.encrypted === true || message.encrypted === 'True' || message.encrypted === 'true';
+            const needsDecryption = hasRawContent && isEncryptedFlag && isCiphertext;
+
             const _msgId = `msg_text_${message.id}`;
-            const _displayText = _isEncrypted
+            const _displayText = needsDecryption
                 ? '' // Will be filled in async
-                : (message.content ? escapeHtml(message.content) : '');
+                : (hasRawContent ? escapeHtml(message.content) : '');
 
             messageEl.innerHTML = `
                 <div class="message-avatar">${avatarContent}</div>
                 <div class="message-content">
                     <div class="message-bubble">
                         ${replyHtml}
-                        ${message.content ? `<div class="message-text" id="${_msgId}" style="${_isEncrypted ? 'color:#aaa;font-style:italic;' : ''}">${_isEncrypted ? '🔐 Decrypting...' : _displayText}</div>` : ''}
+                        ${hasRawContent ? `<div class="message-text" id="${_msgId}" style="${needsDecryption ? 'color:#aaa;font-style:italic;' : ''}">${needsDecryption ? '🔐 Decrypting...' : _displayText}</div>` : ''}
                         ${attachmentsHtml}
                         <div class="message-info">
                             <span>${time}</span>
-                            ${_isEncrypted ? '<span class="encryption-badge" title="End-to-end encrypted">🔒</span>' : ''}
+                            ${isEncryptedFlag ? '<span class="encryption-badge" title="End-to-end encrypted">🔒</span>' : ''}
                             ${message.edited ? '<span title="Edited">✏️</span>' : ''}
                             ${isSent ? '<span class="message-status">✓✓</span>' : ''}
                         </div>
@@ -2138,19 +2670,50 @@
             `;
 
             // Async decrypt: replace placeholder with real content
-            if (_isEncrypted && message.content && CryptoEngine._ready) {
+            if (needsDecryption) {
                 const _chatId = activeChat?.id;
-                CryptoEngine.decryptText(_chatId, message.content).then(plain => {
-                    const el = document.getElementById(_msgId);
-                    if (el) {
-                        if (plain !== null) {
-                            el.style.cssText = '';
-                            el.textContent = plain;
-                        } else {
-                            el.innerHTML = '<em style="color:#888;font-size:12px">🔒 Encrypted message (no key)</em>';
+                const textEl = messageEl.querySelector('.message-text');
+
+                const doDecrypt = async () => {
+                    if (!CryptoEngine._ready) {
+                        await CryptoEngine.init().catch(() => {});
+                    }
+                    if (_chatId && !CryptoEngine.hasKey(_chatId) && activeChat) {
+                        if (activeChat.type === 'direct' && activeChat.other_user_id) {
+                            await CryptoEngine.setupChatKey(_chatId, activeChat.other_user_id).catch(() => {});
+                        } else if (activeChat.type === 'group' && activeChat.member_ids) {
+                            await CryptoEngine.setupGroupChatKey(_chatId, activeChat.member_ids).catch(() => {});
                         }
                     }
-                }).catch(() => { });
+                    return await CryptoEngine.decryptText(_chatId, message.content);
+                };
+
+                const fallbackOrEncryptedNotice = (targetEl) => {
+                    const raw = message.content || '';
+                    if (!isLikelyBinaryCiphertext(raw)) {
+                        targetEl.style.cssText = '';
+                        targetEl.textContent = raw;
+                    } else {
+                        targetEl.innerHTML = '<em style="color:var(--text-muted, #888);font-size:12px">🔒 Encrypted message (key not on this device)</em>';
+                    }
+                };
+
+                doDecrypt().then(plain => {
+                    const targetEl = textEl || document.getElementById(_msgId);
+                    if (targetEl) {
+                        if (plain !== null) {
+                            targetEl.style.cssText = '';
+                            targetEl.textContent = plain;
+                        } else {
+                            fallbackOrEncryptedNotice(targetEl);
+                        }
+                    }
+                }).catch(() => {
+                    const targetEl = textEl || document.getElementById(_msgId);
+                    if (targetEl) {
+                        fallbackOrEncryptedNotice(targetEl);
+                    }
+                });
             }
 
             return messageEl;
@@ -2234,6 +2797,9 @@
 
                     // Re-render chat list
                     await renderChats();
+                } else {
+                    // Real-time fallback: pull updated chats if new chat arrived
+                    await loadChats();
                 }
             } catch (error) {
                 console.error('Error updating chat preview:', error);
@@ -2257,20 +2823,100 @@
         }
 
         // ==================== FILE CONVERSION FUNCTIONS ====================
-        async function loadConversionFormats(fileExtension, fileId) {
-            try {
-                const response = await fetch(`${API_URL}/files/conversion-formats?ext=${fileExtension}`, {
-                    headers: { 'Authorization': `Bearer ${authToken}` }
-                });
+        const LOCAL_CONVERSION_MAP = {
+            // Images
+            jpg: ['png', 'webp', 'pdf', 'bmp', 'tiff', 'ico', 'gif', 'jpeg'],
+            jpeg: ['png', 'webp', 'pdf', 'bmp', 'tiff', 'ico', 'gif', 'jpg'],
+            png: ['jpg', 'jpeg', 'webp', 'pdf', 'bmp', 'tiff', 'ico', 'gif'],
+            webp: ['jpg', 'jpeg', 'png', 'pdf', 'bmp', 'tiff', 'gif'],
+            gif: ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'pdf', 'mp4'],
+            bmp: ['jpg', 'jpeg', 'png', 'webp', 'pdf', 'tiff', 'gif'],
+            tiff: ['jpg', 'jpeg', 'png', 'webp', 'pdf', 'bmp'],
+            tif: ['jpg', 'jpeg', 'png', 'webp', 'pdf', 'bmp'],
+            ico: ['png', 'jpg', 'jpeg', 'bmp'],
+            
+            // Documents
+            pdf: ['docx', 'txt', 'html', 'md', 'rtf'],
+            docx: ['pdf', 'txt', 'html', 'md', 'rtf'],
+            doc: ['pdf', 'txt', 'html', 'docx'],
+            pptx: ['pdf', 'txt', 'html', 'docx'],
+            ppt: ['pdf', 'txt', 'pptx', 'docx'],
+            xlsx: ['csv', 'pdf', 'txt', 'html'],
+            xls: ['csv', 'pdf', 'txt', 'xlsx'],
+            txt: ['pdf', 'docx', 'html', 'md', 'rtf'],
+            html: ['pdf', 'txt', 'docx', 'md'],
+            md: ['pdf', 'html', 'txt', 'docx'],
+            rtf: ['pdf', 'txt', 'docx', 'html'],
+            csv: ['xlsx', 'pdf', 'txt', 'html'],
+            
+            // Audio
+            mp3: ['wav', 'ogg', 'aac', 'flac', 'm4a', 'wma', 'opus'],
+            wav: ['mp3', 'ogg', 'aac', 'flac', 'm4a', 'opus'],
+            ogg: ['mp3', 'wav', 'aac', 'flac', 'm4a'],
+            aac: ['mp3', 'wav', 'ogg', 'flac', 'm4a'],
+            flac: ['mp3', 'wav', 'ogg', 'aac', 'm4a'],
+            m4a: ['mp3', 'wav', 'ogg', 'aac', 'flac'],
+            wma: ['mp3', 'wav', 'ogg', 'aac'],
+            opus: ['mp3', 'wav', 'ogg', 'aac'],
+            
+            // Video
+            mp4: ['mp3', 'wav', 'avi', 'webm', 'mkv', 'mov', 'flv', 'wmv', 'gif'],
+            avi: ['mp4', 'mp3', 'webm', 'mkv', 'mov'],
+            mov: ['mp4', 'mp3', 'avi', 'webm', 'mkv'],
+            webm: ['mp4', 'mp3', 'avi', 'mkv'],
+            mkv: ['mp4', 'mp3', 'avi', 'webm', 'mov'],
+            flv: ['mp4', 'mp3', 'avi', 'webm'],
+            wmv: ['mp4', 'mp3', 'avi'],
+            
+            // Archives
+            zip: ['tar', 'gz', '7z'],
+            tar: ['zip', 'gz'],
+            gz: ['zip', 'tar'],
+            '7z': ['zip', 'tar'],
+            rar: ['zip', 'tar']
+        };
 
-                if (!response.ok) throw new Error('Failed to load formats');
-
-                const data = await response.json();
-                return data.formats || [];
-            } catch (error) {
-                console.error('Load formats error:', error);
-                return [];
+        function getFileExtension(file) {
+            if (!file) return '';
+            let ext = '';
+            const fname = (file.name || '').trim();
+            if (fname.includes('.')) {
+                ext = fname.split('.').pop().toLowerCase().trim();
             }
+            if (!ext && file.type) {
+                const mimeMap = {
+                    'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png',
+                    'image/webp': 'webp', 'image/gif': 'gif', 'image/bmp': 'bmp',
+                    'image/tiff': 'tiff', 'image/x-icon': 'ico', 'image/vnd.microsoft.icon': 'ico',
+                    'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov',
+                    'video/x-msvideo': 'avi', 'video/x-matroska': 'mkv',
+                    'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/wav': 'wav',
+                    'audio/ogg': 'ogg', 'audio/aac': 'aac', 'audio/m4a': 'm4a', 'audio/flac': 'flac',
+                    'application/pdf': 'pdf', 'text/plain': 'txt', 'text/html': 'html',
+                    'text/markdown': 'md', 'application/zip': 'zip', 'application/rtf': 'rtf',
+                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+                    'application/msword': 'doc'
+                };
+                ext = mimeMap[file.type.toLowerCase()] || '';
+            }
+            return (ext || '').replace(/^\./, '');
+        }
+
+        async function loadConversionFormats(fileExtension, fileId) {
+            const cleanExt = (fileExtension || '').toLowerCase().replace(/^\./, '');
+            if (!cleanExt) return [];
+            try {
+                const response = await fetch(`${API_URL}/files/conversion-formats?ext=${cleanExt}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data && Array.isArray(data.formats) && data.formats.length > 0) {
+                        return data.formats;
+                    }
+                }
+            } catch (error) {
+                console.warn('Backend load formats failed, using local conversion fallback:', error);
+            }
+            return LOCAL_CONVERSION_MAP[cleanExt] || [];
         }
 
         function handleFormatSelection() {
@@ -2295,9 +2941,14 @@
             const file = window.currentFileForConversion;
             const targetFormat = document.getElementById('targetFormatSelect').value;
             const sendBtn = document.getElementById('sendBtn');
+            const voiceBtn = document.getElementById('voiceRecordBtn');
 
             if (!targetFormat) {
-                alert('Please select a target format');
+                if (typeof showToast === 'function') {
+                    showToast('Please select a target format', 'error');
+                } else {
+                    alert('Please select a target format');
+                }
                 return;
             }
 
@@ -2309,47 +2960,64 @@
             const conversionProgress = document.getElementById('conversionProgress');
             const progressFill = document.getElementById('progressFill');
             const progressText = document.getElementById('progressText');
+            let progressInterval = null;
 
             try {
-                // 🔒 Disable send while converting
-                sendBtn.disabled = true;
-                convertBtn.disabled = true;
-                convertBtnText.style.display = 'none';
-                convertBtnSpinner.style.display = 'inline-block';
-                conversionProgress.style.display = 'flex';
+                // 🔒 Disable send and convert while running
+                if (sendBtn) sendBtn.disabled = true;
+                if (convertBtn) convertBtn.disabled = true;
+                if (convertBtnText) {
+                    convertBtnText.textContent = 'Convert';
+                    convertBtnText.style.display = 'none';
+                }
+                if (convertBtnSpinner) convertBtnSpinner.style.display = 'inline-block';
+                if (conversionProgress) {
+                    conversionProgress.style.display = 'flex';
+                    if (progressFill) progressFill.style.backgroundColor = '';
+                }
 
-                // Fake progress bar
+                // Progress animation
                 let progress = 0;
-                const progressInterval = setInterval(() => {
+                progressInterval = setInterval(() => {
                     progress += 10;
                     if (progress <= 90) {
-                        progressFill.style.width = `${progress}%`;
-                        progressText.textContent = `Converting... ${progress}%`;
+                        if (progressFill) progressFill.style.width = `${progress}%`;
+                        if (progressText) progressText.textContent = `Converting... ${progress}%`;
                     }
-                }, 300);
+                }, 200);
 
-                // 1️⃣ Upload original file
-                const formData = new FormData();
-                formData.append('file', file);
+                let fileId = file.serverId;
 
-                const uploadResponse = await fetch(`${API_URL}/upload/file`, {
-                    method: 'POST',
-                    headers: { 'Authorization': `Bearer ${authToken}` },
-                    body: formData
-                });
+                // 1️⃣ Upload original file if not already on server
+                if (!fileId) {
+                    const formData = new FormData();
+                    formData.append('file', file);
 
-                if (!uploadResponse.ok) throw new Error('Upload failed');
+                    const uploadHeaders = {};
+                    if (authToken) uploadHeaders['Authorization'] = `Bearer ${authToken}`;
 
-                const uploadData = await uploadResponse.json();
-                const fileId = uploadData.file.id;
+                    const uploadResponse = await fetch(`${API_URL}/upload/file`, {
+                        method: 'POST',
+                        headers: uploadHeaders,
+                        body: formData
+                    });
+
+                    if (!uploadResponse.ok) {
+                        const errTxt = await uploadResponse.text();
+                        throw new Error(`Upload failed: ${errTxt}`);
+                    }
+
+                    const uploadData = await uploadResponse.json();
+                    fileId = uploadData.file.id;
+                }
 
                 // 2️⃣ Convert file
+                const convertHeaders = { 'Content-Type': 'application/json' };
+                if (authToken) convertHeaders['Authorization'] = `Bearer ${authToken}`;
+
                 const convertResponse = await fetch(`${API_URL}/files/convert`, {
                     method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${authToken}`,
-                        'Content-Type': 'application/json'
-                    },
+                    headers: convertHeaders,
                     body: JSON.stringify({
                         file_id: fileId,
                         target_format: targetFormat
@@ -2365,7 +3033,7 @@
 
                 const convertData = await convertResponse.json();
 
-                // 3️⃣ Use server-converted file directly (no re-upload)
+                // 3️⃣ Use server-converted file directly
                 let downloadUrl = convertData.converted_file.url;
                 if (!downloadUrl.startsWith('http')) {
                     downloadUrl = downloadUrl.startsWith('/api')
@@ -2380,79 +3048,113 @@
                     name: convertData.converted_file.filename,
                     url: downloadUrl,
                     mime: convertData.converted_file.type || '',
-                    fileType: convertData.converted_file.type || 'file'  // ✅ Store file type for message_type detection
+                    fileType: convertData.converted_file.type || 'file',
+                    size: convertData.converted_file.size || 0
                 };
 
-                // 4️⃣ Replace original file in selectedFiles
-                const index = selectedFiles.findIndex(f => f.name === file.name);
-                if (index !== -1) {
-                    selectedFiles[index] = convertedRef;
+                // 4️⃣ Atomically replace original file in selectedFiles
+                const origName = file.name;
+                selectedFiles = selectedFiles.map(f => (f.name === origName || f === file) ? convertedRef : f);
+                if (!selectedFiles.includes(convertedRef)) {
+                    selectedFiles.push(convertedRef);
                 }
+                // Store converted reference
+                window.currentFileForConversion = convertedRef;
 
-                // 5️⃣ Update preview
+                // 5️⃣ Update preview container: re-render all selected files cleanly
                 const filePreviewItems = document.getElementById('filePreviewItems');
-                // Ensure preview container is restored after conversion
                 const filePreviewContainer = document.getElementById('filePreviewContainer');
                 if (filePreviewContainer) {
                     filePreviewContainer.style.display = 'flex';
+                    filePreviewContainer.style.visibility = 'visible';
                 }
 
-                // Replace original preview with converted file preview
-                filePreviewItems.innerHTML = '';
-                await addFilePreview(convertedRef);
+                if (filePreviewItems) {
+                    filePreviewItems.innerHTML = '';
+                    for (const f of selectedFiles) {
+                        await addFilePreview(f);
+                    }
+                }
 
-                progressFill.style.width = '100%';
-                progressText.textContent = 'Conversion complete ✓';
+                if (progressFill) progressFill.style.width = '100%';
+                if (progressText) progressText.textContent = `Conversion complete ✓ (${targetFormat.toUpperCase()})`;
 
-                showNotification(
-                    'Success',
-                    `File converted to ${targetFormat.toUpperCase()}`
-                );
+                if (typeof showToast === 'function') {
+                    showToast(`Converted ${origName} → ${convertedRef.name}`, 'success');
+                } else {
+                    showNotification('Success', `File converted to ${targetFormat.toUpperCase()}`);
+                }
 
                 setTimeout(() => {
-                    document.getElementById('conversionPanel').style.display = 'none';
-                    conversionProgress.style.display = 'none';
-                    convertBtnText.style.display = 'inline';
-                    convertBtnSpinner.style.display = 'none';
-                    convertBtn.disabled = false;
+                    const convPanel = document.getElementById('conversionPanel');
+                    if (convPanel) convPanel.style.display = 'none';
+                    if (conversionProgress) conversionProgress.style.display = 'none';
+                    if (convertBtnText) convertBtnText.style.display = 'inline';
+                    if (convertBtnSpinner) convertBtnSpinner.style.display = 'none';
+                    if (convertBtn) convertBtn.disabled = false;
 
-                    // ✅ Enable send ONLY after replacement
-                    sendBtn.disabled = false;
-                }, 800);
+                    // ✅ Reveal and enable Send button
+                    if (sendBtn) {
+                        sendBtn.disabled = false;
+                        sendBtn.style.display = 'flex';
+                    }
+                    if (voiceBtn) {
+                        voiceBtn.style.display = 'none';
+                    }
+                    updateSendButtonVisibility();
+                }, 700);
 
             } catch (error) {
+                if (typeof progressInterval !== 'undefined' && progressInterval) {
+                    clearInterval(progressInterval);
+                    progressInterval = null;
+                }
                 console.error('❌ Conversion error:', error);
-                showError('Conversion failed: ' + error.message);
+                const errMsg = error.message || 'Conversion failed';
+                if (typeof showToast === 'function') {
+                    showToast(`Conversion failed: ${errMsg}`, 'error');
+                } else {
+                    showError('Conversion failed: ' + errMsg);
+                }
 
-                conversionProgress.style.display = 'none';
-                convertBtnText.style.display = 'inline';
-                convertBtnSpinner.style.display = 'none';
-                convertBtn.disabled = false;
-                sendBtn.disabled = false;
+                if (conversionProgress) {
+                    conversionProgress.style.display = 'flex';
+                    if (progressFill) {
+                        progressFill.style.width = '100%';
+                        progressFill.style.backgroundColor = '#e5484d';
+                    }
+                    if (progressText) progressText.textContent = `❌ Failed: ${errMsg}`;
+                }
+                if (convertBtnText) {
+                    convertBtnText.textContent = '🔄 Retry';
+                    convertBtnText.style.display = 'inline';
+                }
+                if (convertBtnSpinner) convertBtnSpinner.style.display = 'none';
+                if (convertBtn) convertBtn.disabled = false;
+                if (sendBtn) sendBtn.disabled = false;
+                updateSendButtonVisibility();
             }
         }
 
         async function updateFilePreviewAfterConversion(oldFileId, newFile) {
-            // Remove old preview
             const oldItem = document.querySelector(`[data-file-id="${oldFileId}"]`);
             if (oldItem) oldItem.remove();
 
-            // Update attachment list
             const index = attachedFiles.findIndex(f => f.id === oldFileId);
             if (index !== -1) {
                 attachedFiles[index] = newFile;
             }
 
-            // Add new preview
             const container = document.getElementById('filePreviewItems');
             const item = createFilePreviewItem(newFile);
             container.insertBefore(item, container.firstChild);
         }
 
-        async function showConversionPanel(file, fileExtension) {
+        async function showConversionPanel(file, fileExtensionParam) {
             const panel = document.getElementById('conversionPanel');
             const currentFormatSpan = document.getElementById('currentFormat');
             const targetSelect = document.getElementById('targetFormatSelect');
+            const convertBtn = document.getElementById('convertFileBtn');
             const sendBtn = document.getElementById('sendBtn');
 
             if (!panel || !currentFormatSpan || !targetSelect) {
@@ -2460,18 +3162,40 @@
                 return;
             }
 
-            console.log('🔄 Setting up conversion panel for:', fileExtension);
+            if (!file) {
+                panel.style.display = 'none';
+                return;
+            }
+
+            const fileExtension = (fileExtensionParam || getFileExtension(file)).toLowerCase();
+            console.log('🔄 Setting up conversion panel for:', file.name, 'ext:', fileExtension);
 
             // Store file reference for conversion
             window.currentFileForConversion = file;
 
-            sendBtn.disabled = false; // Allow sending even without conversion
+            // Highlight active preview item
+            document.querySelectorAll('.file-preview-item').forEach(item => {
+                if (item.dataset.fileName === file.name) {
+                    item.classList.add('conversion-active-file');
+                } else {
+                    item.classList.remove('conversion-active-file');
+                }
+            });
 
-            currentFormatSpan.textContent = fileExtension.toUpperCase();
+            // Keep send button available
+            if (sendBtn) {
+                sendBtn.disabled = false;
+                sendBtn.style.display = 'flex';
+            }
+            const voiceBtn = document.getElementById('voiceRecordBtn');
+            if (voiceBtn) voiceBtn.style.display = 'none';
 
-            // Load conversion formats from backend API
-            const formats = await loadConversionFormats(fileExtension, null);
+            const displayLabel = fileExtension ? fileExtension.toUpperCase() : 'FILE';
+            currentFormatSpan.textContent = displayLabel;
+            currentFormatSpan.title = file.name;
 
+            // Load conversion formats
+            const formats = await loadConversionFormats(fileExtension);
             console.log('✅ Available formats for', fileExtension, ':', formats);
 
             targetSelect.innerHTML = '<option value="">Select format to convert</option>';
@@ -2481,6 +3205,10 @@
                 option.textContent = `.${format.toUpperCase()}`;
                 targetSelect.appendChild(option);
             });
+
+            if (convertBtn) {
+                convertBtn.disabled = true;
+            }
 
             if (formats.length > 0) {
                 panel.style.display = 'block';
@@ -2502,146 +3230,142 @@
             }
 
             const sendBtn = document.getElementById('sendBtn');
-            sendBtn.disabled = true;
+            if (sendBtn) sendBtn.disabled = true;
 
             try {
                 let attachmentIds = [];
-                let attachmentTypes = [];  // ✅ Store file types
+                let attachmentTypes = [];
 
-                // Upload files if any
+                // Upload or prepare files if any
                 if (selectedFiles.length > 0) {
-                    console.log(`📤 Uploading ${selectedFiles.length} files...`);
-
-                    // Show uploading indicator
-                    showNotification('Uploading', `Uploading ${selectedFiles.length} file(s)...`);
+                    console.log(`📤 Processing ${selectedFiles.length} files...`);
 
                     try {
                         const uploadResult = await uploadFiles();
                         attachmentIds = uploadResult.ids || [];
-                        attachmentTypes = uploadResult.types || [];  // ✅ Get file types
+                        attachmentTypes = uploadResult.types || [];
 
                         if (attachmentIds.length === 0) {
-                            throw new Error('No files were uploaded successfully');
+                            throw new Error('No files were attached or uploaded');
                         }
 
-                        // Verify we got valid IDs
-                        if (attachmentIds.some(id => !id || id === 'undefined')) {
-                            throw new Error('Invalid file IDs received from server');
-                        }
-
-                        console.log('✅ Files uploaded successfully, IDs:', attachmentIds, 'Types:', attachmentTypes);
-
-                        // Clear file selection
+                        // Clear file selection and preview
                         selectedFiles = [];
+                        window.currentFileForConversion = null;
                         const filePreviewItems = document.getElementById('filePreviewItems');
-                        if (filePreviewItems) {
-                            filePreviewItems.innerHTML = '';
-                        }
-                        document.getElementById('filePreviewContainer').style.display = 'none';
-
-                        showNotification('Success', `${attachmentIds.length} file(s) uploaded`);
+                        if (filePreviewItems) filePreviewItems.innerHTML = '';
+                        const filePreviewContainer = document.getElementById('filePreviewContainer');
+                        if (filePreviewContainer) filePreviewContainer.style.display = 'none';
+                        const conversionPanel = document.getElementById('conversionPanel');
+                        if (conversionPanel) conversionPanel.style.display = 'none';
 
                     } catch (uploadError) {
-                        console.error('❌ File upload failed:', uploadError);
-                        showError('Failed to upload files: ' + uploadError.message);
-                        sendBtn.disabled = false;
-                        return; // Stop here if upload fails
+                        console.error('❌ File attachment failed:', uploadError);
+                        showError('Failed to attach files: ' + uploadError.message);
+                        if (sendBtn) sendBtn.disabled = false;
+                        return;
                     }
                 }
 
-                // Send message via WebSocket
+                // 🔒 Encrypt message content if E2E key is available
+                let plainContent = content || '';
+                let encryptedContent = plainContent;
+                let isE2eEncrypted = false;
+
+                if (plainContent && CryptoEngine.hasKey(activeChat.id)) {
+                    const ct = await CryptoEngine.encryptText(activeChat.id, plainContent);
+                    if (ct) {
+                        encryptedContent = ct;
+                        isE2eEncrypted = true;
+                    }
+                }
+
+                if (!isE2eEncrypted && attachmentIds.length > 0 && window._encryptedFileIds) {
+                    isE2eEncrypted = attachmentIds.some(id => window._encryptedFileIds.has(id));
+                }
+
+                // Determine message type
+                let messageType = 'text';
+                if (attachmentIds.length > 0) {
+                    const firstType = attachmentTypes[0] || 'file';
+                    const allSameType = attachmentTypes.every(t => t === firstType);
+                    messageType = allSameType ? firstType : 'file';
+                }
+
+                const messageData = {
+                    type: 'message',
+                    chat_id: activeChat.id,
+                    content: encryptedContent,
+                    encrypted: isE2eEncrypted,
+                    message_type: messageType,
+                    attachments: attachmentIds,
+                    reply_to: replyToMessageId || null
+                };
+
+                // Send via WebSocket if open, otherwise HTTP fallback
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    // 🔒 Encrypt message content if E2E key is available
-                    let plainContent = content || '';
-                    let encryptedContent = plainContent;
-                    let isE2eEncrypted = false;
-
-                    if (plainContent && CryptoEngine.hasKey(activeChat.id)) {
-                        const ct = await CryptoEngine.encryptText(activeChat.id, plainContent);
-                        if (ct) {
-                            encryptedContent = ct;
-                            isE2eEncrypted = true;
-                        }
-                    }
-
-                    // If any attached file was encrypted, mark the whole message encrypted
-                    if (!isE2eEncrypted && attachmentIds.length > 0 && window._encryptedFileIds) {
-                        isE2eEncrypted = attachmentIds.some(id => window._encryptedFileIds.has(id));
-                    }
-
-                    // ✅ Determine message type based on uploaded file types
-                    let messageType = 'text';
-                    if (attachmentIds.length > 0) {
-                        // Use first file's type, or 'file' if mixed types
-                        const firstType = attachmentTypes[0] || 'file';
-                        const allSameType = attachmentTypes.every(t => t === firstType);
-                        messageType = allSameType ? firstType : 'file';
-                    }
-
-                    const messageData = {
-                        type: 'message',
-                        chat_id: activeChat.id,
-                        content: encryptedContent,
-                        encrypted: isE2eEncrypted,
-                        message_type: messageType,  // ✅ Use detected type
-                        attachments: attachmentIds,
-                        reply_to: replyToMessageId || null
-                    };
-
                     console.log('📤 Sending message via WebSocket:', messageData);
                     ws.send(JSON.stringify(messageData));
-
-                    // Clear input
-                    input.value = '';
-                    input.style.height = 'auto';
-
-                    // Clear reply indicator
-                    if (replyToMessageId) {
-                        cancelReply();
-                    }
-
-                    // Stop typing indicator
-                    if (isTyping) {
-                        isTyping = false;
-                        ws.send(JSON.stringify({
-                            type: 'typing',
-                            chat_id: activeChat.id,
-                            is_typing: false
-                        }));
-                    }
-
-                    console.log('✅ Message sent successfully');
-
                 } else {
-                    throw new Error('WebSocket not connected. Please check your connection.');
+                    console.warn('⚠️ WebSocket not OPEN, using HTTP fallback to send message');
+                    const httpResp = await fetch(`${API_URL}/chats/${activeChat.id}/messages`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${authToken}`
+                        },
+                        body: JSON.stringify({
+                            content: encryptedContent,
+                            message_type: messageType,
+                            encrypted: isE2eEncrypted,
+                            attachments: attachmentIds,
+                            reply_to: replyToMessageId || null
+                        })
+                    });
+
+                    if (!httpResp.ok) {
+                        const httpErr = await httpResp.json();
+                        throw new Error(httpErr.error || 'Failed to send message via HTTP');
+                    }
+
+                    // Reload messages immediately so sender sees the message
+                    await loadMessages(activeChat.id);
                 }
+
+                // Clear input
+                input.value = '';
+                input.style.height = 'auto';
+
+                // Clear reply indicator
+                if (replyToMessageId) {
+                    cancelReply();
+                }
+
+                // Stop typing indicator
+                if (isTyping && ws && ws.readyState === WebSocket.OPEN) {
+                    isTyping = false;
+                    ws.send(JSON.stringify({
+                        type: 'typing',
+                        chat_id: activeChat.id,
+                        is_typing: false
+                    }));
+                }
+
+                console.log('✅ Message sent successfully');
+
+                // Real-time local chat preview update
+                updateChatPreviewInList(activeChat.id, {
+                    last_message: plainContent || (attachmentIds.length > 0 ? 'Sent an attachment' : ''),
+                    last_message_type: messageType,
+                    last_message_time: new Date().toISOString()
+                });
 
             } catch (error) {
                 console.error('❌ Send message error:', error);
                 showError('Failed to send message: ' + error.message);
             } finally {
-                sendBtn.disabled = false;
-            }
-            // Clear input
-            input.value = '';
-            input.style.height = 'auto';
-
-            // Clear reply indicator
-            if (replyToMessageId) {
-                cancelReply();
-            }
-
-            // ✅ NEW: Reset button visibility after sending
-            updateSendButtonVisibility();
-
-            // Stop typing indicator
-            if (isTyping) {
-                isTyping = false;
-                ws.send(JSON.stringify({
-                    type: 'typing',
-                    chat_id: activeChat.id,
-                    is_typing: false
-                }));
+                if (sendBtn) sendBtn.disabled = false;
+                updateSendButtonVisibility();
             }
         }
 
@@ -2681,15 +3405,17 @@
             const messageInput = document.getElementById('messageInput');
             const sendBtn = document.getElementById('sendBtn');
             const voiceBtn = document.getElementById('voiceRecordBtn');
+            if (!sendBtn || !voiceBtn) return;
 
             // Check if there's text OR files selected
-            const hasText = messageInput.value.trim().length > 0;
-            const hasFiles = selectedFiles.length > 0;
+            const hasText = messageInput ? messageInput.value.trim().length > 0 : false;
+            const hasFiles = Array.isArray(selectedFiles) && selectedFiles.length > 0;
             const shouldShowSend = hasText || hasFiles;
 
             if (shouldShowSend) {
                 voiceBtn.style.display = 'none';
                 sendBtn.style.display = 'flex';
+                sendBtn.disabled = false;
             } else {
                 sendBtn.style.display = 'none';
                 voiceBtn.style.display = 'flex';
@@ -2730,7 +3456,40 @@
             }
         }
 
+        function formatLastSeen(dateString) {
+            if (!dateString) return '';
+            try {
+                const d = new Date(dateString);
+                if (isNaN(d.getTime())) return '';
+                const now = new Date();
+                const diffMs = now - d;
+                const diffMin = Math.floor(diffMs / 60000);
+                if (diffMin < 1) return 'just now';
+                if (diffMin < 60) return `${diffMin}m ago`;
+                const diffHours = Math.floor(diffMin / 60);
+                if (diffHours < 24) return `${diffHours}h ago`;
+                return d.toLocaleDateString();
+            } catch (e) {
+                return '';
+            }
+        }
+
+        function updateActiveChatStatusUI(status, lastSeen) {
+            const statusEl = document.getElementById('activeChatStatus');
+            if (!statusEl) return;
+            const isOnline = (status === 'online');
+            statusEl.className = isOnline ? 'online' : 'offline';
+            if (isOnline) {
+                statusEl.innerHTML = '<span class="status-badge-dot online"></span>online';
+            } else if (lastSeen) {
+                statusEl.innerHTML = `<span class="status-badge-dot offline"></span>last seen ${formatLastSeen(lastSeen)}`;
+            } else {
+                statusEl.innerHTML = '<span class="status-badge-dot offline"></span>offline';
+            }
+        }
+
         function handleUserStatus(data) {
+            console.log('👤 Real-time user status update:', data.user_id, data.status);
             chats = chats.map(chat => {
                 if (chat.id === data.user_id || (chat.type === 'direct' && chat.other_user_id === data.user_id)) {
                     return { ...chat, status: data.status, last_seen: data.last_seen };
@@ -2738,8 +3497,10 @@
                 return chat;
             });
 
-            if (activeChat && activeChat.other_user_id === data.user_id) {
-                document.getElementById('activeChatStatus').textContent = data.status;
+            if (activeChat && (activeChat.other_user_id === data.user_id || activeChat.id === data.user_id)) {
+                activeChat.status = data.status;
+                activeChat.last_seen = data.last_seen;
+                updateActiveChatStatusUI(data.status, data.last_seen);
             }
 
             renderChats();
@@ -2774,182 +3535,132 @@
             }, 500);
         }
 
+        let _isFileSelectingLock = false;
         async function handleFileSelect(event) {
             console.log('📁 ===== FILE SELECT STARTED =====');
 
-            const files = Array.from(event.target.files);
+            if (_isFileSelectingLock) {
+                console.warn('⚠️ File selection already in progress, ignoring duplicate event');
+                return;
+            }
+            _isFileSelectingLock = true;
+
+            const files = Array.from(event?.target?.files || []);
             console.log('📱 Files selected:', files.length);
 
-            if (files.length === 0) {
-                console.warn('⚠️ No files selected');
-                return;
-            }
+            // Clear target value immediately so selecting the same file again triggers change
+            try {
+                if (event && event.target) event.target.value = '';
+            } catch (e) {}
 
-            // ✅ MOBILE: Better visual feedback
-            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-            if (isMobile) {
-                // Provide immediate feedback on mobile
-                showNotification('Files Selected', `${files.length} file(s) - Processing...`);
-            } else {
-                showNotification('Processing', `Preparing ${files.length} file(s)...`);
-            }
-
-            const container = document.getElementById('filePreviewContainer');
-            const filePreviewItems = document.getElementById('filePreviewItems');
-
-            if (!container || !filePreviewItems) {
-                console.error('❌ Preview containers not found!');
-                showError('Error: Preview container missing');
-                return;
-            }
-
-            console.log('📦 Containers found');
-
-            // ✅ CRITICAL FIX: Clear all previous file previews before adding new ones
-            selectedFiles = [];
-            filePreviewItems.innerHTML = '';
-            // Clean up any legacy previews that were attached directly to the container
-            container.querySelectorAll('.file-preview-item').forEach(item => item.remove());
-
-            // ✅ MOBILE: Force container to be visible with strong styling
-            container.style.display = 'flex';
-            container.style.visibility = 'visible';
-            container.style.opacity = '1';
-            container.style.zIndex = '10';
-
-            filePreviewItems.innerHTML = '<div style="padding:10px;color:#C97A3D;font-size:14px;font-weight:600;">📦 Processing files...</div>';
-
-            console.log('✅ Container forced visible');
-
-            let successCount = 0;
-            let errorFiles = [];
-
-            for (const file of files) {
-                console.log('📄 Processing:', file.name, file.type, formatFileSize(file.size));
-
-                if (selectedFiles.some(f => f.name === file.name && f.size === file.size)) {
-                    console.log('⏭️ Duplicate file ignored:', file.name);
-                    continue;
+            try {
+                if (files.length === 0) {
+                    console.warn('⚠️ No files selected');
+                    return;
                 }
 
-                if (file.size > 100 * 1024 * 1024) {
-                    console.error('❌ File too large:', file.name);
-                    errorFiles.push(`${file.name} (too large)`);
-                    continue;
+                // Processing feedback (handled cleanly via preview container)
+
+                const container = document.getElementById('filePreviewContainer');
+                const filePreviewItems = document.getElementById('filePreviewItems');
+
+                if (!container || !filePreviewItems) {
+                    console.error('❌ Preview containers not found!');
+                    showError('Error: Preview container missing');
+                    return;
                 }
 
-                try {
-                    selectedFiles.push(file);
+                console.log('📦 Containers found');
+
+                // ✅ Clear all previous file previews and selection state
+                selectedFiles = [];
+                window.currentFileForConversion = null;
+                filePreviewItems.innerHTML = '';
+                container.querySelectorAll('.file-preview-item').forEach(item => item.remove());
+
+                container.style.display = 'flex';
+                container.style.visibility = 'visible';
+                container.style.opacity = '1';
+                container.style.zIndex = '10';
+
+                filePreviewItems.innerHTML = '<div style="padding:10px;color:#C97A3D;font-size:14px;font-weight:600;">📦 Processing files...</div>';
+
+                let successCount = 0;
+                let errorFiles = [];
+
+                // Filter out any duplicates in the incoming array
+                const uniqueIncoming = [];
+                for (const f of files) {
+                    if (!uniqueIncoming.some(u => u.name === f.name && u.size === f.size)) {
+                        uniqueIncoming.push(f);
+                    }
+                }
+
+                for (const file of uniqueIncoming) {
+                    console.log('📄 Processing:', file.name, file.type, formatFileSize(file.size));
+
+                    if (selectedFiles.some(f => f.name === file.name && f.size === file.size)) {
+                        console.log('⏭️ Duplicate file ignored:', file.name);
+                        continue;
+                    }
+
+                    if (file.size > 100 * 1024 * 1024) {
+                        console.error('❌ File too large:', file.name);
+                        errorFiles.push(`${file.name} (too large)`);
+                        continue;
+                    }
 
                     try {
-                        await addFilePreview(file);
-                    } catch (e) {
-                        console.warn('⚠️ Preview failed (mobile-safe):', e);
+                        selectedFiles.push(file);
+
+                        try {
+                            await addFilePreview(file);
+                        } catch (e) {
+                            console.warn('⚠️ Preview failed (mobile-safe):', e);
+                        }
+                        successCount++;
+                    } catch (error) {
+                        console.error('❌ File processing error:', error);
+                        errorFiles.push(file.name);
                     }
-                    successCount++;
-                } catch (error) {
-                    console.error('❌ File processing error:', error);
-                    errorFiles.push(file.name);
-                }
-            }
-
-            const processingMsg = filePreviewItems.querySelector('div');
-            if (processingMsg && processingMsg.textContent.includes('Processing')) {
-                processingMsg.remove();
-            }
-
-            if (selectedFiles.length > 0) {
-                container.style.display = 'flex';
-                console.log('✅ Files ready:', selectedFiles.length);
-
-                // ✅ MOBILE: More visible success notification
-                if (isMobile) {
-                    showNotification('✅ Ready to Send', `${successCount} file(s) attached`);
-                } else {
-                    showNotification('Ready', `${successCount} file(s) ready to send`);
                 }
 
-                updateSendButtonVisibility();
+                const processingMsg = filePreviewItems.querySelector('div');
+                if (processingMsg && processingMsg.textContent.includes('Processing')) {
+                    processingMsg.remove();
+                }
 
-                // ✅ CRITICAL FIX: Show conversion panel for FIRST file
-                if (selectedFiles.length === 1) {
+                if (selectedFiles.length > 0) {
+                    container.style.display = 'flex';
+                    console.log('✅ Files ready:', selectedFiles.length);
+
+                    updateSendButtonVisibility();
+
+                    // ✅ Show conversion panel for attached files
                     const firstFile = selectedFiles[0];
-                    const extension = firstFile.name.split('.').pop().toLowerCase();
-
-                    console.log('🔄 Single file selected - showing conversion for:', extension);
-                    await showConversionPanel(firstFile, extension);
+                    window.currentFileForConversion = firstFile;
+                    console.log('🔄 File(s) attached - showing conversion panel for:', firstFile.name);
+                    await showConversionPanel(firstFile);
                 } else {
-                    // ✅ Multiple files - hide conversion panel
-                    console.log('📎 Multiple files selected - hiding conversion panel');
+                    container.style.display = 'none';
                     hideConversionPanel();
+                    console.warn('⚠️ No files were successfully processed');
                 }
-            } else {
-                container.style.display = 'none';
-                hideConversionPanel();
-                console.warn('⚠️ No files were successfully processed');
-            }
-            if (errorFiles.length > 0) {
-                showError(`Failed to process: ${errorFiles.join(', ')}`);
-            }
 
-            console.log('📁 ===== FILE SELECT COMPLETE =====');
-            event.target.value = '';
+                if (errorFiles.length > 0) {
+                    showError(`Failed to process: ${errorFiles.join(', ')}`);
+                }
+
+                console.log('📁 ===== FILE SELECT COMPLETE =====');
+            } finally {
+                setTimeout(() => {
+                    _isFileSelectingLock = false;
+                }, 300);
+            }
         }
         // ==================== FILE CONVERSION HELPER ====================
         async function showConversionPanelForFile(file, fileExtension) {
-            const panel = document.getElementById('conversionPanel');
-            const currentFormatSpan = document.getElementById('currentFormat');
-            const targetSelect = document.getElementById('targetFormatSelect');
-            const sendBtn = document.getElementById('sendBtn');
-
-            if (!panel || !currentFormatSpan || !targetSelect) {
-                console.warn('⚠️ Conversion panel elements not found');
-                return;
-            }
-
-            console.log('🔄 Checking conversion options for:', fileExtension);
-
-            // Disable send button while conversion options are shown
-            sendBtn.disabled = true;
-
-            currentFormatSpan.textContent = fileExtension.toUpperCase();
-
-            try {
-                // Load supported formats from backend
-                const response = await fetch(`${API_URL}/files/conversion-formats?ext=${fileExtension}`, {
-                    headers: { 'Authorization': `Bearer ${authToken}` }
-                });
-
-                if (!response.ok) throw new Error('Failed to load formats');
-
-                const data = await response.json();
-                const formats = data.formats || [];
-
-                console.log('✅ Available formats:', formats);
-
-                targetSelect.innerHTML = '<option value="">Select format to convert</option>';
-                formats.forEach(format => {
-                    const option = document.createElement('option');
-                    option.value = format;
-                    option.textContent = `.${format.toUpperCase()}`;
-                    targetSelect.appendChild(option);
-                });
-
-                // Show panel only if conversion formats exist
-                if (formats.length > 0) {
-                    panel.style.display = 'block';
-                    console.log('✅ Conversion panel shown with', formats.length, 'formats');
-                } else {
-                    panel.style.display = 'none';
-                    sendBtn.disabled = false; // Enable send if no conversion needed
-                    console.log('ℹ️ No conversion formats available');
-                }
-
-            } catch (error) {
-                console.error('❌ Failed to load conversion formats:', error);
-                panel.style.display = 'none';
-                sendBtn.disabled = false; // Enable send on error
-            }
+            return showConversionPanel(file, fileExtension);
         }
 
         async function addFilePreviewForConverted(fileObj) {
@@ -3105,22 +3816,38 @@
             const previewItem = document.createElement('div');
             previewItem.className = 'file-preview-item';
             previewItem.dataset.fileName = file.name;
-            previewItem.style.cssText = 'position: relative; width: 90px; height: 90px; min-width: 90px; flex-shrink: 0; border-radius: 12px; overflow: hidden; background: rgba(0,0,0,0.5); border: 1.5px solid rgba(218,165,32,0.2);';
+            previewItem.style.cursor = 'pointer';
+            previewItem.title = `Click to convert ${file.name}`;
+            
+            // Check if this file is currently targeted for conversion
+            if (window.currentFileForConversion && (window.currentFileForConversion === file || window.currentFileForConversion.name === file.name)) {
+                previewItem.classList.add('conversion-active-file');
+            }
+
+            // Clicking preview tile opens conversion panel for this file
+            previewItem.onclick = (e) => {
+                if (e.target.closest('.file-preview-remove')) return;
+                const target = window.selectedFiles?.find(f => f.name === file.name) || file;
+                showConversionPanel(target);
+            };
 
             console.log('📎 Adding preview for:', file.name, file.type);
 
             // If this is a converted reference with a direct URL, use it for preview
             if (file.__converted && file.url) {
-                const ext = (file.name.split('.').pop() || '').toLowerCase();
+                const ext = getFileExtension(file);
                 const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext);
                 if (isImage) {
                     previewItem.innerHTML = `
                         <img src="${file.url}" alt="${escapeHtml(file.name)}" 
                             style="width: 100%; height: 100%; object-fit: cover;">
-                        <button class="file-preview-remove" onclick="removeFilePreview('${escapeHtml(file.name)}')">✕</button>
+                        <button class="file-preview-remove" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); removeFilePreview(this.dataset.filename)">✕</button>
+                        <div class="file-preview-convert-badge converted" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); showConversionPanel(window.selectedFiles?.find(f => f.name === this.dataset.filename) || file)" title="Converted file">
+                            ✅ CONVERTED
+                        </div>
                     `;
                 } else {
-                    showFileIconPreview(previewItem, { name: file.name, type: file.mime || '' });
+                    showFileIconPreview(previewItem, file);
                 }
             } else if (file.type && file.type.startsWith('image/')) {
                 try {
@@ -3134,7 +3861,10 @@
                     previewItem.innerHTML = `
                         <img src="${dataUrl}" alt="${escapeHtml(file.name)}" 
                             style="width: 100%; height: 100%; object-fit: cover;">
-                        <button class="file-preview-remove" onclick="removeFilePreview('${escapeHtml(file.name)}')">✕</button>
+                        <button class="file-preview-remove" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); removeFilePreview(this.dataset.filename)">✕</button>
+                        <div class="file-preview-convert-badge ${file.__converted ? 'converted' : ''}" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); showConversionPanel(window.selectedFiles?.find(f => f.name === this.dataset.filename) || file)" title="Convert this image">
+                            ${file.__converted ? '✅ CONVERTED' : '🔄 CONVERT'}
+                        </div>
                     `;
                 } catch (error) {
                     console.error('❌ Image preview error:', error);
@@ -3142,9 +3872,11 @@
                 }
             } else if (file.type && file.type.startsWith('video/')) {
                 previewItem.innerHTML = `
-                    <div style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; font-size: 48px;">🎥</div>
-                    <button class="file-preview-remove" onclick="removeFilePreview('${escapeHtml(file.name)}')">✕</button>
-                    <div style="position: absolute; bottom: 5px; left: 5px; right: 5px; font-size: 10px; color: white; background: rgba(0,0,0,0.7); padding: 3px; border-radius: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(file.name.substring(0, 12))}</div>
+                    <div style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; font-size: 38px;">🎥</div>
+                    <button class="file-preview-remove" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); removeFilePreview(this.dataset.filename)">✕</button>
+                    <div class="file-preview-convert-badge ${file.__converted ? 'converted' : ''}" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); showConversionPanel(window.selectedFiles?.find(f => f.name === this.dataset.filename) || file)" title="Convert this video">
+                        ${file.__converted ? '✅ CONVERTED' : '🔄 CONVERT'}
+                    </div>
                 `;
             } else {
                 showFileIconPreview(previewItem, file);
@@ -3161,20 +3893,29 @@
 
         function showFileIconPreview(previewItem, file) {
             let icon = '📄';
-            if (file.type.startsWith('audio/')) icon = '🎵';
-            else if (file.type.includes('pdf')) icon = '📕';
-            else if (file.type.includes('zip') || file.type.includes('rar')) icon = '📦';
-            else if (file.type.includes('word') || file.type.includes('document')) icon = '📘';
-            else if (file.type.includes('sheet') || file.type.includes('excel')) icon = '📗';
+            const ftype = (file.type || file.mime || file.fileType || '').toLowerCase();
+            const fname = (file.name || '').toLowerCase();
 
-            const fileName = file.name.length > 12 ? file.name.substring(0, 12) + '...' : file.name;
+            if (ftype.startsWith('audio/') || fname.endsWith('.mp3') || fname.endsWith('.wav') || fname.endsWith('.ogg') || fname.endsWith('.m4a') || fname.endsWith('.aac')) icon = '🎵';
+            else if (ftype.includes('pdf') || fname.endsWith('.pdf')) icon = '📕';
+            else if (ftype.includes('zip') || ftype.includes('rar') || fname.endsWith('.zip') || fname.endsWith('.rar') || fname.endsWith('.7z') || fname.endsWith('.tar') || fname.endsWith('.gz')) icon = '📦';
+            else if (ftype.includes('word') || ftype.includes('document') || fname.endsWith('.doc') || fname.endsWith('.docx')) icon = '📘';
+            else if (ftype.includes('sheet') || ftype.includes('excel') || fname.endsWith('.xls') || fname.endsWith('.xlsx') || fname.endsWith('.csv')) icon = '📗';
+            else if (ftype.includes('presentation') || ftype.includes('powerpoint') || fname.endsWith('.ppt') || fname.endsWith('.pptx')) icon = '📊';
+
+            const displayName = file.name.length > 12 ? file.name.substring(0, 10) + '...' : file.name;
+            const extLabel = (file.name.split('.').pop() || '').toUpperCase();
+            const isConverted = file.__converted === true;
 
             previewItem.innerHTML = `
-                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%;">
-                    <div style="font-size: 42px;">${icon}</div>
-                    <div style="font-size: 9px; color: white; margin-top: 5px; text-align: center; padding: 0 5px;">${escapeHtml(fileName)}</div>
+                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; padding: 4px; box-sizing: border-box;">
+                    <div style="font-size: 32px; line-height: 1; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.35));">${icon}</div>
+                    <div style="font-size: 10px; color: var(--text-primary, #EDE9E2); margin-top: 3px; text-align: center; max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600;">${escapeHtml(displayName)}</div>
+                    <div class="file-preview-convert-badge ${isConverted ? 'converted' : ''}" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); showConversionPanel(window.selectedFiles?.find(f => f.name === this.dataset.filename) || file)" title="Convert this file">
+                        ${isConverted ? '✅ CONVERTED' : '🔄 CONVERT'}
+                    </div>
                 </div>
-                <button class="file-preview-remove" onclick="removeFilePreview('${escapeHtml(file.name)}')">✕</button>
+                <button class="file-preview-remove" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); removeFilePreview(this.dataset.filename)">✕</button>
             `;
         }
 
@@ -3193,11 +3934,6 @@
 
             const container = document.getElementById('filePreviewContainer');
 
-            // ✅ CRITICAL: Hide conversion panel when file removed
-            if (selectedFiles.length !== 1) {
-                hideConversionPanel();
-            }
-
             if (selectedFiles.length === 0) {
                 if (container) {
                     container.style.display = 'none';
@@ -3205,13 +3941,10 @@
                 }
                 hideConversionPanel();
                 updateSendButtonVisibility();
-            } else if (selectedFiles.length === 1) {
-                // ✅ Show conversion for remaining single file
-                const remainingFile = selectedFiles[0];
-                const extension = remainingFile.name.split('.').pop().toLowerCase();
-                showConversionPanel(remainingFile, extension);
-                console.log(`📎 ${selectedFiles.length} file(s) remaining`);
             } else {
+                // Switch conversion panel to first remaining file
+                const remainingFile = selectedFiles[0];
+                showConversionPanel(remainingFile);
                 console.log(`📎 ${selectedFiles.length} file(s) remaining`);
             }
         }
@@ -3234,7 +3967,6 @@
 
                 try {
                     console.log(`📤 Uploading file ${i + 1}/${selectedFiles.length}:`, file.name);
-                    showNotification('Uploading', `File ${i + 1}/${selectedFiles.length}: ${file.name}`);
 
                     // ── E2E File Encryption (documents/audio/video, not images) ──────
                     const _isImg = file.type.startsWith('image/');
@@ -4009,6 +4741,14 @@
 
             console.log('📞 === ANSWERING CALL (MOBILE-FIXED) ===');
 
+            if (callSyncChannel && currentCall) {
+                try {
+                    callSyncChannel.postMessage({ type: 'call_answered_elsewhere', callId: currentCall.id });
+                } catch (e) {
+                    console.warn('⚠️ callSyncChannel error:', e);
+                }
+            }
+
             try {
                 const _aw = document.getElementById('answerCallWrap');
                 if (_aw) _aw.style.display = 'none';
@@ -4165,6 +4905,12 @@
 
         function endCall() {
             console.log('🔚 Ending call...');
+
+            if (callSyncChannel && currentCall) {
+                try {
+                    callSyncChannel.postMessage({ type: 'call_ended_elsewhere', callId: currentCall.id });
+                } catch (e) {}
+            }
 
             // ✅ Handle group calls first
             if (isGroupCall) {
@@ -5609,7 +6355,7 @@
 
             viewer.innerHTML = `
                 <button onclick="this.parentElement.remove()" style="position: absolute; top: 20px; right: 20px; width: 40px; height: 40px; border-radius: 50%; background: rgba(255,255,255,0.2); border: none; color: #fff; font-size: 24px; cursor: pointer;">✕</button>
-                <img src="${url}" alt="${filename}" style="max-width: 90%; max-height: 90%; border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,0.5);">
+                <img src="${url}" alt="${escapeHtml(filename)}" style="max-width: 90%; max-height: 90%; border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,0.5);">
                 <div style="position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); padding: 10px 20px; border-radius: 20px; color: #fff; font-size: 14px; max-width: 80%; text-align: center; word-break: break-word;">
                     ${escapeHtml(filename)}
                 </div>
@@ -5926,16 +6672,16 @@
                     const roleText = isAdmin ? '👑 Admin' : (member.role === 'admin' ? 'Admin' : 'Member');
 
                     membersHTML += `
-                        <div class="group-member-item" style="display: flex; align-items: center; gap: 15px; padding: 15px; background: rgba(0,0,0,0.4); border: 1px solid rgba(218,165,32,0.2); border-radius: 10px; margin-bottom: 10px; transition: all 0.3s;" onmouseenter="this.style.background='rgba(218,165,32,0.1)'; this.style.borderColor='rgba(218,165,32,0.4)';" onmouseleave="this.style.background='rgba(0,0,0,0.4)'; this.style.borderColor='rgba(218,165,32,0.2)';">
-                            <div class="avatar" style="width: 50px; height: 50px; font-size: 24px; flex-shrink: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 600;">
+                        <div class="group-member-item">
+                            <div class="avatar" style="width: 44px; height: 44px; font-size: 18px; flex-shrink: 0; background: var(--accent-violet-gradient); border-radius: 14px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 600;">
                                 ${avatarContent}
                             </div>
                             <div style="flex: 1; min-width: 0;">
-                                <div style="font-weight: 600; font-size: 16px; margin-bottom: 3px; color: #fff;">
+                                <div style="font-weight: 600; font-size: 14.5px; margin-bottom: 2px; color: var(--text-primary);">
                                     ${escapeHtml(member.username || 'Unknown')}
-                                    ${isYou ? '<span style="color: #DAA520; font-size: 12px;"> (You)</span>' : ''}
+                                    ${isYou ? '<span style="color: var(--accent-amber); font-size: 12px; font-weight: 700;"> (You)</span>' : ''}
                                 </div>
-                                <div style="font-size: 12px; color: #888;">
+                                <div style="font-size: 12px; color: var(--text-secondary);">
                                     ${member.email || 'No email'} • ${roleText}
                                 </div>
                             </div>
@@ -6013,27 +6759,27 @@
 
                 // Create search interface
                 container.innerHTML = `
-                    <div style="margin-bottom: 20px;">
-                        <h3 style="margin-bottom: 15px; color: #DAA520;">Add Members</h3>
+                    <div style="margin-bottom: 18px;">
+                        <h3 style="margin-bottom: 12px; color: var(--accent-amber); font-size: 17px; font-weight: 700;">Add Members</h3>
                         <input 
                             type="text" 
                             id="memberSearchInput" 
                             placeholder="🔍 Search users by username or email..." 
                             oninput="searchUsersForGroup(this.value)"
-                            style="width: 100%; padding: 12px; background: rgba(0,0,0,0.4); border: 1px solid rgba(218,165,32,0.3); border-radius: 10px; color: #fff; font-size: 14px;"
+                            style="width: 100%; padding: 12px 16px; background: var(--input-bg); border: 1px solid var(--input-border); border-radius: 14px; color: var(--text-primary); font-size: 14px;"
                         >
                     </div>
-                    <div id="memberSearchResults" style="max-height: 400px; overflow-y: auto;">
-                        <div style="text-align: center; color: #888; padding: 40px;">
+                    <div id="memberSearchResults" style="max-height: 380px; overflow-y: auto;">
+                        <div style="text-align: center; color: var(--text-muted); padding: 40px;">
                             <p style="font-size: 40px; margin-bottom: 10px;">👥</p>
-                            <p>Search for users to add</p>
+                            <p style="font-size: 14px; font-weight: 500;">Search for users to add</p>
                             <p style="font-size: 12px; margin-top: 5px;">Type at least 2 characters</p>
                         </div>
                     </div>
-                    <div id="selectedMembersCount" style="margin-top: 15px; padding: 10px; background: rgba(218, 165, 32, 0.1); border-radius: 8px; display: none;">
-                        <span id="groupSelectedCountText" style="color: #DAA520; font-size: 14px;">0 users selected</span>
+                    <div id="selectedMembersCount" style="margin-top: 14px; padding: 10px 14px; background: var(--accent-amber-subtle); border: 1px solid var(--accent-amber-border); border-radius: 12px; display: none;">
+                        <span id="groupSelectedCountText" style="color: var(--accent-amber); font-size: 13.5px; font-weight: 600;">0 users selected</span>
                     </div>
-                    <button class="btn-primary" onclick="addSelectedMembersToGroup()" id="addMembersBtn" style="margin-top: 15px; width: 100%; opacity: 0.5;" disabled>
+                    <button class="btn-primary" onclick="addSelectedMembersToGroup()" id="addMembersBtn" style="margin-top: 14px; width: 100%; opacity: 0.5;" disabled>
                         ➕ Add Selected
                     </button>
                 `;
@@ -6664,10 +7410,13 @@
             }
         }
         function escapeHtml(text) {
-            if (!text) return '';
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            if (text === null || text === undefined) return '';
+            return String(text)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
         }
 
         function formatFileSize(bytes) {
@@ -6730,12 +7479,16 @@
                 if (!username || !password) {
                     console.log('❌ Validation failed: empty fields');
                     showError('Please enter username and password');
+                    const btn = document.getElementById('authSubmitBtn');
+                    if (btn) btn.dataset.submitting = 'false';
                     return;
                 }
 
                 if (!isLoginMode && password.length < 6) {
                     console.log('❌ Validation failed: password too short');
                     showError('Password must be at least 6 characters');
+                    const btn = document.getElementById('authSubmitBtn');
+                    if (btn) btn.dataset.submitting = 'false';
                     return;
                 }
 
@@ -6778,9 +7531,13 @@
                         authToken = data.token;
                         currentUser = data.user;
                         localStorage.setItem('auth_token', authToken);
+                        if (data.refresh_token) {
+                            localStorage.setItem('refresh_token', data.refresh_token);
+                        }
                         localStorage.setItem('current_user', JSON.stringify(currentUser));
+                        scheduleProactiveTokenRefresh();
 
-                        console.log('✅ Auth successful, token stored');
+                        console.log('✅ Auth successful, tokens stored');
                         showSuccess(isLoginMode ? 'Login successful!' : 'Registration successful!');
                         setTimeout(() => showChatInterface(), 500);
                     } else {
@@ -6792,8 +7549,21 @@
                     showError('Connection error: ' + error.message);
                 } finally {
                     setAuthLoading(false);
+                    const btn = document.getElementById('authSubmitBtn');
+                    if (btn) btn.dataset.submitting = 'false';
                 }
             }, true); // ← ADD THIS: true = use capture phase
+
+            // Clear submitting flag and hide errors when typing credentials
+            ['username', 'password', 'email', 'phone'].forEach(fieldId => {
+                const inputEl = document.getElementById(fieldId);
+                if (inputEl) {
+                    inputEl.addEventListener('input', () => {
+                        const btn = document.getElementById('authSubmitBtn');
+                        if (btn) btn.dataset.submitting = 'false';
+                    });
+                }
+            });
 
             // Attach toggle handler
             const toggleLink = document.getElementById('toggleLink');
@@ -7014,55 +7784,89 @@
             closeModal('userMenuModal');
 
             try {
-                const response = await fetch(API_URL + '/users/settings', {
-                    headers: { 'Authorization': `Bearer ${authToken}` }
-                });
+                let userObj = currentUser || {};
+                let settings = {};
 
-                const data = await response.json();
+                try {
+                    const response = await fetch(API_URL + '/users/settings', {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        if (data && data.user) userObj = data.user;
+                        if (data && data.settings) settings = data.settings;
+                    }
+                } catch (e) {
+                    console.warn('Could not fetch /users/settings, using currentUser fallback:', e);
+                }
 
-                document.getElementById('settingsUsername').value = data.user.username || '';
-                document.getElementById('settingsEmail').value = data.user.email || '';
-                document.getElementById('settingsBio').value = data.user.bio || '';
+                if (document.getElementById('settingsUsername')) {
+                    document.getElementById('settingsUsername').value = userObj.username || '';
+                }
+                if (document.getElementById('settingsEmail')) {
+                    document.getElementById('settingsEmail').value = userObj.email || '';
+                }
+                if (document.getElementById('settingsBio')) {
+                    document.getElementById('settingsBio').value = userObj.bio || '';
+                }
 
-                // Phone display (now a div)
+                // Phone display
                 const phoneEl = document.getElementById('settingsPhone');
-                if (phoneEl) phoneEl.textContent = data.user.phone || 'Not set';
+                if (phoneEl) phoneEl.textContent = userObj.phone || 'Not set';
 
-                const settings = data.settings || {};
-                document.getElementById('notificationsSetting').checked = settings.notifications !== false;
-                document.getElementById('readReceiptsSetting').checked = settings.read_receipts !== false;
-                document.getElementById('typingIndicatorSetting').checked = settings.typing_indicator !== false;
-                document.getElementById('onlineStatusSetting').checked = settings.online_status !== false;
+                if (document.getElementById('notificationsSetting')) {
+                    document.getElementById('notificationsSetting').checked = settings.notifications !== false;
+                }
+                if (document.getElementById('readReceiptsSetting')) {
+                    document.getElementById('readReceiptsSetting').checked = settings.read_receipts !== false;
+                }
+                if (document.getElementById('typingIndicatorSetting')) {
+                    document.getElementById('typingIndicatorSetting').checked = settings.typing_indicator !== false;
+                }
+                if (document.getElementById('onlineStatusSetting')) {
+                    document.getElementById('onlineStatusSetting').checked = settings.online_status !== false;
+                }
 
-                if (data.user.phone_verified) {
-                    document.getElementById('phoneVerificationStatus').innerHTML = '✅ Verified';
-                    document.getElementById('phoneVerificationStatus').style.color = '#4CAF50';
-                } else {
-                    document.getElementById('phoneVerificationStatus').innerHTML = '❌ Not verified';
-                    document.getElementById('phoneVerificationStatus').style.color = '#E5484D';
+                // Sync theme toggle
+                const settingsThemeToggle = document.getElementById('settingsThemeToggle');
+                if (settingsThemeToggle) {
+                    const currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+                    settingsThemeToggle.checked = currentTheme === 'dark';
+                }
+
+                const statusEl = document.getElementById('phoneVerificationStatus');
+                if (statusEl) {
+                    if (userObj.phone_verified) {
+                        statusEl.innerHTML = '✅ Verified';
+                        statusEl.style.color = '#4CAF50';
+                    } else {
+                        statusEl.innerHTML = '❌ Not verified';
+                        statusEl.style.color = '#E5484D';
+                    }
                 }
 
                 // Show avatar
                 const avatarPreview = document.getElementById('settingsAvatarPreview');
-                if (data.user.avatar_url) {
-                    const avatarUrl = data.user.avatar_url.startsWith('http')
-                        ? data.user.avatar_url
-                        : `${API_URL}${data.user.avatar_url}`;
+                if (avatarPreview && userObj.avatar_url) {
+                    const avatarUrl = userObj.avatar_url.startsWith('http')
+                        ? userObj.avatar_url
+                        : `${API_URL}${userObj.avatar_url}`;
                     avatarPreview.innerHTML = `
                         <img src="${avatarUrl}" alt="Avatar">
                         <div class="avatar-hover-overlay">📷<span>Change</span></div>
-                        <div class="avatar-upload-btn">📷</div>
                     `;
                 }
 
-                // Refresh security tab
-                _refreshSecurityTab();
+                // Refresh security tab if present
+                if (typeof _refreshSecurityTab === 'function') {
+                    _refreshSecurityTab();
+                }
 
                 document.getElementById('settingsModal').classList.add('active');
 
             } catch (error) {
                 console.error('Load settings error:', error);
-                showError('Failed to load settings');
+                document.getElementById('settingsModal').classList.add('active');
             }
         }
 
@@ -7283,7 +8087,7 @@
                             // Update settings modal preview
                             document.getElementById('settingsAvatarPreview').innerHTML = `
                                 <img src="${avatarUrl}" alt="Avatar" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">
-                                <div class="avatar-upload-btn" onclick="document.getElementById('avatarUpload').click()">📷</div>
+                                <div class="avatar-hover-overlay">📷<span>Change</span></div>
                             `;
 
                             // Update sidebar avatar
@@ -8169,14 +8973,38 @@
             // Initialize country codes
             initializeCountryCodeDropdown();
 
-            // Check for saved token (auto-login)
+            // Check for saved token (auto-login with seamless session restoration)
             const savedToken = localStorage.getItem('auth_token');
             const savedUser = localStorage.getItem('current_user');
+            const savedRefreshToken = localStorage.getItem('refresh_token');
 
             if (savedToken && savedUser) {
                 authToken = savedToken;
-                currentUser = JSON.parse(savedUser);
-                showChatInterface();
+                try {
+                    currentUser = JSON.parse(savedUser);
+                } catch {
+                    currentUser = null;
+                }
+
+                if (currentUser) {
+                    // If saved token is expired or expiring within 5 minutes, renew immediately
+                    if (savedRefreshToken && isTokenExpiringSoon(savedToken, 300)) {
+                        console.log('🔄 Session token expiring soon on startup, renewing in background...');
+                        _doRefreshToken().then(() => scheduleProactiveTokenRefresh());
+                    } else {
+                        scheduleProactiveTokenRefresh();
+                    }
+                    showChatInterface();
+                }
+            } else if (savedRefreshToken && savedUser) {
+                // Restore session using refresh token
+                console.log('🔄 Restoring session from refresh token...');
+                _doRefreshToken().then(ok => {
+                    if (ok) {
+                        try { currentUser = JSON.parse(savedUser); } catch { currentUser = null; }
+                        if (currentUser) showChatInterface();
+                    }
+                });
             }
 
             // Set up Google button with initial disabled state
@@ -8280,9 +9108,13 @@
                                 authToken = data.token;
                                 currentUser = data.user;
                                 localStorage.setItem('auth_token', authToken);
+                                if (data.refresh_token) {
+                                    localStorage.setItem('refresh_token', data.refresh_token);
+                                }
                                 localStorage.setItem('current_user', JSON.stringify(currentUser));
+                                scheduleProactiveTokenRefresh();
 
-                                console.log('✅ Google Sign-In successful');
+                                console.log('✅ Google Sign-In successful, tokens stored');
                                 showSuccess('Signed in with Google successfully!');
                                 setTimeout(() => showChatInterface(), 500);
                             } else {
@@ -9724,12 +10556,15 @@
             return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
         }
 
-        // Helper: Escape HTML
+        // Helper: Escape HTML (comprehensive escaping)
         function escapeHtml(text) {
-            if (!text) return '';
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            if (text === null || text === undefined) return '';
+            return String(text)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
         }
 
         // Initialize global variables
@@ -10487,5 +11322,102 @@
             style.textContent = `@keyframes toastSlideIn {from{opacity:0;transform:translateY(30px) scale(0.9);}to{opacity:1;transform:translateY(0) scale(1);}}`;
             document.head.appendChild(style);
         }
+
+        // ===== MODERN THEME MANAGEMENT SYSTEM (Dark / Light Glassmorphism) =====
+        function initTheme() {
+            const savedTheme = localStorage.getItem('decentral_theme');
+            let theme = savedTheme;
+            if (!theme) {
+                // Default to dark mode (Ref 1)
+                theme = 'dark';
+            }
+            applyTheme(theme);
+        }
+
+        function applyTheme(theme) {
+            document.documentElement.setAttribute('data-theme', theme);
+            document.body.setAttribute('data-theme', theme);
+
+            const isDark = theme === 'dark';
+            const icon = isDark ? '🌙' : '☀️';
+
+            const themeIcon = document.getElementById('themeIcon');
+            if (themeIcon) themeIcon.textContent = icon;
+
+            const loginThemeIcon = document.getElementById('loginThemeIcon');
+            if (loginThemeIcon) loginThemeIcon.textContent = icon;
+
+            const themeToggleBtn = document.getElementById('themeToggleBtn');
+            if (themeToggleBtn) {
+                themeToggleBtn.setAttribute('title', isDark ? 'Switch to Light Theme' : 'Switch to Dark Theme');
+            }
+
+            const settingsToggle = document.getElementById('settingsThemeToggle');
+            if (settingsToggle) {
+                settingsToggle.checked = isDark;
+            }
+
+            localStorage.setItem('decentral_theme', theme);
+        }
+
+        function toggleTheme(preferredTheme) {
+            const currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+            let newTheme;
+            if (preferredTheme && typeof preferredTheme === 'string') {
+                newTheme = preferredTheme;
+            } else {
+                newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+            }
+            applyTheme(newTheme);
+            if (typeof showToast === 'function') {
+                showToast(`Switched to ${newTheme === 'dark' ? 'Cyber Obsidian Glass' : 'Alabaster Spatial Glass'} theme`, 'info');
+            }
+        }
+
+        window.initTheme = initTheme;
+        window.applyTheme = applyTheme;
+        window.toggleTheme = toggleTheme;
+
+        // ===== NAVIGATION RAIL CONTROLLER =====
+        function switchNavSection(section) {
+            const navButtons = document.querySelectorAll('.nav-rail-btn');
+            navButtons.forEach(btn => btn.classList.remove('active'));
+
+            const activeBtn = document.getElementById(`navBtn${section.charAt(0).toUpperCase() + section.slice(1)}`);
+            if (activeBtn) activeBtn.classList.add('active');
+
+            if (section === 'chats') {
+                const sidebar = document.getElementById('sidebar');
+                if (sidebar) sidebar.classList.remove('collapsed');
+            } else if (section === 'contacts') {
+                if (typeof openContactsManager === 'function') openContactsManager();
+            } else if (section === 'calls') {
+                if (typeof loadCallHistory === 'function') loadCallHistory();
+            } else if (section === 'settings') {
+                if (typeof openProfileSettings === 'function') openProfileSettings();
+            }
+        }
+        window.switchNavSection = switchNavSection;
+
+        // ===== CHAT LIST FILTER CHIPS =====
+        window.currentChatFilter = 'all';
+        function filterChatList(filterType) {
+            window.currentChatFilter = filterType;
+            const chips = document.querySelectorAll('.chat-filter-chip');
+            chips.forEach(chip => {
+                if (chip.getAttribute('data-filter') === filterType) {
+                    chip.classList.add('active');
+                } else {
+                    chip.classList.remove('active');
+                }
+            });
+            if (typeof renderChats === 'function') {
+                renderChats();
+            }
+        }
+        window.filterChatList = filterChatList;
+
+        // Auto-run theme initialization
+        initTheme();
         
 

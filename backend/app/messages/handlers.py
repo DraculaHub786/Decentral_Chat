@@ -67,7 +67,14 @@ async def get_messages(self, request):
                 
                 if fb_docs:
                     logger.info(f"✅ Found {len(fb_docs)} messages in Firestore for chat {chat_id}")
-                    # Store them in Redis for next time
+                    # Fetch all existing IDs in Redis for this chat to avoid duplicate insertion
+                    raw_existing = await g.redis_client.lrange(f"chat_messages:{chat_id}", 0, -1)
+                    existing_set = {
+                        item.decode() if isinstance(item, bytes) else item
+                        for item in raw_existing
+                    }
+
+                    # Store them in Redis for next time if not already stored
                     for msg_doc in reversed(fb_docs):
                         msg_data = msg_doc.to_dict()
                         msg_id = msg_doc.id
@@ -87,7 +94,9 @@ async def get_messages(self, request):
                         }
                         
                         await g.redis_client.hset(f"message:{msg_id}", mapping=redis_msg_data)
-                        await g.redis_client.lpush(f"chat_messages:{chat_id}", msg_id)
+                        if msg_id not in existing_set:
+                            await g.redis_client.lpush(f"chat_messages:{chat_id}", msg_id)
+                            existing_set.add(msg_id)
                     
                     await g.redis_client.ltrim(f"chat_messages:{chat_id}", 0, 999)
                     
@@ -102,14 +111,16 @@ async def get_messages(self, request):
                 logger.warning(f"Firestore fallback for messages failed: {fb_err}")
 
         messages = []
+        seen_msg_ids = set()
 
         for raw_msg_id in message_ids:
             # 🔥 CRITICAL FIX (DO NOT REMOVE)
             msg_id = raw_msg_id.decode() if isinstance(raw_msg_id, bytes) else raw_msg_id
 
-            # Delete-for-me filtering
-            if msg_id in deleted_for_me:
+            # Deduplication & Delete-for-me filtering
+            if msg_id in seen_msg_ids or msg_id in deleted_for_me:
                 continue
+            seen_msg_ids.add(msg_id)
 
             msg_data = await g.redis_client.hgetall(f"message:{msg_id}")
             if not msg_data:
@@ -199,7 +210,7 @@ async def get_messages(self, request):
             messages.append({
                 "id": msg_id,
                 "content": msg_data.get('content'),
-                "encrypted": msg_data.get('encrypted') == 'True',
+                "encrypted": str(msg_data.get('encrypted', False)).strip().lower() in ('true', '1'),
                 "message_type": msg_data.get('message_type'),
                 "attachments": attachments,
                 "created_at": msg_data.get('created_at'),

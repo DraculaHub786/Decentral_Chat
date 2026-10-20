@@ -1,0 +1,30 @@
+{
+  "include": [
+    "backend",
+    "backend/app",
+    "app"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    "uploads"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "extraPaths": [
+    ".venv/Lib/site-packages",
+    "C:/Users/afjal/AppData/Local/Programs/Python/Python311/Lib/site-packages",
+    "backend",
+    "./backend",
+    "app",
+    "."
+  ],
+  "pythonVersion": "3.11",
+  "pythonPlatform": "Windows",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "none",
+  "diagnosticSeverityOverrides": {
+    "reportMissingImports": "none",
+    "reportMissingModuleSource": "none"
+  }
+}

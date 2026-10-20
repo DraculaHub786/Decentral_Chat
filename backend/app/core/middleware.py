@@ -40,14 +40,39 @@ async def security_headers_middleware(request, handler):
     resp.headers['X-Content-Type-Options'] = 'nosniff'
     resp.headers['X-Frame-Options'] = 'DENY'
     resp.headers['X-XSS-Protection'] = '1; mode=block'
+
+    # Build a Content-Security-Policy that:
+    #  - allows same-origin ('self') for everything,
+    #  - allows the server's OWN origin (covers the API when the SPA is served
+    #    from a forwarded / proxied hostname that points at this same backend),
+    #  - allows Google's OAuth / userinfo endpoints (used by Google Sign-In in
+    #    frontend/app.js -> https://www.googleapis.com/oauth2/v3/userinfo),
+    #  - allows websocket schemes for the live chat socket.
+    #
+    # NOTE: A static connect-src 'self' ONLY previously blocked the Google
+    # userinfo call AND every cross-origin API request (port-forwarded URLs,
+    # proxies, 127.0.0.1 vs localhost), surfacing in the browser as
+    # "network error when trying to fetch resources" on login/register/Google.
+    scheme = getattr(request, 'scheme', None) or 'http'
+    host = getattr(request, 'host', None) or 'localhost'
+    own_origin = f"{scheme}://{host}"
+
+    connect_src = (
+        f"'self' {own_origin} ws: wss: "
+        f"https://www.googleapis.com https://accounts.google.com"
+    )
+    frame_src = (
+        f"'self' {own_origin} "
+        f"https://accounts.google.com https://*.google.com"
+    )
     resp.headers['Content-Security-Policy'] = (
         "default-src 'self'; "
         "img-src 'self' data: https:; "
         "media-src 'self' https:; "
-        "connect-src 'self' ws: wss:; "
+        f"connect-src {connect_src}; "
         "font-src 'self' https:; "
         "style-src 'self' 'unsafe-inline' https:; "
         "script-src 'self' 'unsafe-inline' https:; "
-        "frame-src 'none'"
+        f"frame-src {frame_src}"
     )
     return resp

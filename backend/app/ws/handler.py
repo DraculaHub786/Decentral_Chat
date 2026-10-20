@@ -64,12 +64,12 @@ async def websocket_handler(self, request):
                         logger.info(f"🔌 WebSocket connected: {user_id}")
                         
                     except jwt.ExpiredSignatureError:
-                        await ws.send_json({"type": "error", "message": "Token expired"})
-                        await ws.close()
+                        await ws.send_json({"type": "token_expired", "message": "Token expired"})
+                        await ws.close(code=4001, message=b"Token expired")
                         break
                     except jwt.InvalidTokenError:
                         await ws.send_json({"type": "error", "message": "Invalid token"})
-                        await ws.close()
+                        await ws.close(code=4002, message=b"Invalid token")
                         break
                 
                 elif user_id:

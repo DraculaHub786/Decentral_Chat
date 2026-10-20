@@ -39,20 +39,14 @@ async def get_chats(self, request):
         if not chat_ids and self.db:
             logger.warning(f"⚠️ Redis has no chats for user {user_id}, attempting Firestore fallback...")
             try:
-                # Search all chats in Firestore where user is a member
+                # Search only chats where user is in members array
                 chats_ref = self.db.collection('chats')
-                # Firestore doesn't support array-contains-any with large lists well,
-                # so scan all chats and filter
-                all_chats = list(chats_ref.stream())
-                for chat_doc in all_chats:
-                    chat_data_fb = chat_doc.to_dict()
-                    members = chat_data_fb.get('members', [])
-                    if user_id in members:
-                        # Found a chat for this user - restore to Redis
-                        chat_id = chat_doc.id
-                        await g.redis_client.sadd(f"user_chats:{user_id}", chat_id)
-                        chat_ids.add(chat_id)
-                        logger.info(f"✅ Restored chat {chat_id} to Redis for user {user_id}")
+                user_chats_docs = list(chats_ref.where('members', 'array_contains', user_id).stream())
+                for chat_doc in user_chats_docs:
+                    chat_id = chat_doc.id
+                    await g.redis_client.sadd(f"user_chats:{user_id}", chat_id)
+                    chat_ids.add(chat_id)
+                    logger.info(f"✅ Restored chat {chat_id} to Redis for user {user_id}")
                 
                 if chat_ids:
                     logger.info(f"✅ Restored {len(chat_ids)} chats from Firestore to Redis")

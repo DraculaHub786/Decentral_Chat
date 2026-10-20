@@ -111,7 +111,7 @@ def get_supported_conversions(file_extension):
         '7z': ['zip', 'tar'],
         'rar': ['zip', 'tar']
     }
-    return conversion_map.get(file_extension.lower(), [])
+    return conversion_map.get(str(file_extension).lower().lstrip('.'), [])
 
 async def convert_uploaded_file(request):
     """Convert file format endpoint with real-time progress tracking"""
@@ -214,15 +214,17 @@ async def convert_uploaded_file(request):
             audio_exts = ['mp3', 'wav', 'ogg', 'aac', 'm4a']
             video_exts = ['mp4', 'avi', 'mov', 'webm', 'mkv']
             
+            document_exts = ['pdf', 'docx', 'doc', 'txt', 'html', 'md', 'rtf', 'xlsx', 'xls', 'csv', 'pptx', 'ppt']
+            
             # Progress tracking varies by conversion type
             if source_ext in image_exts and (target_format in image_exts or target_format == 'pdf'):
                 await g.redis_client.hset(conversion_id, "progress", "20")
-                result_path = convert_image_format(str(source_path), str(output_path), target_format)
+                result_path = await asyncio.to_thread(convert_image_format, str(source_path), str(output_path), target_format)
                 await g.redis_client.hset(conversion_id, "progress", "90")
                 
-            elif source_ext in ['pdf', 'docx', 'txt'] or target_format in ['pdf', 'docx', 'txt']:
+            elif source_ext in document_exts or target_format in document_exts:
                 await g.redis_client.hset(conversion_id, "progress", "25")
-                result_path = convert_document_format(str(source_path), str(output_path), source_ext, target_format)
+                result_path = await asyncio.to_thread(convert_document_format, str(source_path), str(output_path), source_ext, target_format)
                 await g.redis_client.hset(conversion_id, "progress", "85")
                 
             elif source_ext in audio_exts and target_format in audio_exts:
@@ -234,7 +236,7 @@ async def convert_uploaded_file(request):
                         await g.redis_client.hset(conversion_id, "progress", str(i))
                 
                 progress_task = asyncio.create_task(audio_progress())
-                result_path = convert_audio_format(str(source_path), str(output_path), target_format)
+                result_path = await asyncio.to_thread(convert_audio_format, str(source_path), str(output_path), target_format)
                 await progress_task
                 await g.redis_client.hset(conversion_id, "progress", "90")
                 
@@ -247,7 +249,7 @@ async def convert_uploaded_file(request):
                         await g.redis_client.hset(conversion_id, "progress", str(i))
                 
                 progress_task = asyncio.create_task(video_progress())
-                result_path = convert_video_format(str(source_path), str(output_path), target_format)
+                result_path = await asyncio.to_thread(convert_video_format, str(source_path), str(output_path), target_format)
                 await progress_task
                 await g.redis_client.hset(conversion_id, "progress", "95")
                 

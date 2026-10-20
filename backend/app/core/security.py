@@ -1,4 +1,5 @@
 from app.core.config import BASE_DIR
+from app.core.config import BASE_DIR
 from typing import Dict, Set, Optional, List
 from aiohttp import web
 import aiohttp_cors
@@ -113,8 +114,8 @@ REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
 FIREBASE_CRED = os.getenv('FIREBASE_CRED_PATH', 'firebase-config.json')
 
 # File Upload Configuration
-# Use parent directory's uploads folder (project root)
-UPLOAD_DIR = Path(__file__).parent.parent / 'uploads'
+# Use backend root directory's uploads folder
+UPLOAD_DIR = BASE_DIR / 'uploads'
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 ALLOWED_EXTENSIONS = {
     'image': {'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'},
@@ -191,7 +192,7 @@ def _log_safe(obj):
     import re
     s = re.sub(r'([a-zA-Z0-9])[a-zA-Z0-9._%+-]*@', lambda m: m.group(1) + '***@', s)
     # Redact phone numbers: +919876543210 -> +91******3210
-    s = re.sub(r'(\+\d{2})\d{6}(\d{4})', r'******', s)
+    s = re.sub(r'(\+\d{2})\d{6}(\d{4})', r' ****** ', s)
     return s
 
 
@@ -201,24 +202,41 @@ def _validate_cors_origin(request):
     """
     Validate Origin/Referer header against allowed origins for state-changing requests.
     Only blocks actual mismatches; allows if headers absent.
+    Uses strict URL parsing to prevent prefix spoofing (e.g. localhost:8080.evil.com).
     """
+    from urllib.parse import urlparse
+
     allowed_origins = {'http://localhost:8080', 'http://127.0.0.1:8080'}
     prod_origin = os.getenv('ALLOWED_ORIGIN', '').strip()
     if prod_origin:
         allowed_origins.add(prod_origin)
 
+    try:
+        own_scheme = getattr(request, 'scheme', None) or 'http'
+        own_host = getattr(request, 'host', None) or 'localhost'
+        own_origin = f"{own_scheme}://{own_host}"
+        allowed_origins.add(own_origin)
+    except Exception:
+        pass
+
     if request.method in ('GET', 'HEAD', 'OPTIONS'):
         return True
 
-    origin = request.headers.get('Origin', '').strip().rstrip('/')
-    referer = request.headers.get('Referer', '').strip().rstrip('/')
+    origin = request.headers.get('Origin', '').strip()
+    referer = request.headers.get('Referer', '').strip()
 
     if not origin and not referer:
         return True
 
     check = origin or referer
+    check_parsed = urlparse(check)
+    check_netloc = check_parsed.netloc.lower()
+    check_scheme = check_parsed.scheme.lower()
+
     for allowed in allowed_origins:
-        if check.startswith(allowed):
+        allowed_parsed = urlparse(allowed)
+        if (check_scheme == allowed_parsed.scheme.lower() and
+                check_netloc == allowed_parsed.netloc.lower()):
             return True
 
     import logging
@@ -231,13 +249,7 @@ def _validate_cors_origin(request):
 
 
 def _is_admin(request):
-    """Check if the request user is an admin. Also enabled if DEBUG=true."""
-    if os.getenv('DEBUG', '').lower() in ('true', '1', 'yes'):
-        return True
-    admin_ids_str = os.getenv('ADMIN_USER_IDS', '').strip()
-    if not admin_ids_str:
-        return False
-    admin_ids = set(a.strip() for a in admin_ids_str.split(',') if a.strip())
+    """Check if the request user is an admin. Requires valid authentication."""
     try:
         import jwt
         auth = request.headers.get('Authorization', '')
@@ -245,9 +257,39 @@ def _is_admin(request):
             return False
         token = auth.replace('Bearer ', '')
         payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
-        return payload.get('user_id') in admin_ids
+        user_id = payload.get('user_id')
+        if not user_id:
+            return False
+
+        admin_ids_str = os.getenv('ADMIN_USER_IDS', '').strip()
+        if admin_ids_str:
+            admin_ids = set(a.strip() for a in admin_ids_str.split(',') if a.strip())
+            return user_id in admin_ids
+
+        # In DEBUG mode, allow any valid authenticated user to access debug routes
+        if os.getenv('DEBUG', '').lower() in ('true', '1', 'yes'):
+            return True
+
+        return False
     except Exception:
         return False
+
+
+def get_client_ip(request):
+    """
+    Safely determine client IP for rate limiting and auditing.
+    If TRUST_PROXY=true, uses the first IP from X-Forwarded-For;
+    otherwise strictly uses request.remote.
+    """
+    remote = getattr(request, 'remote', None)
+    trust_proxy = os.getenv('TRUST_PROXY', '').lower() in ('true', '1', 'yes')
+    if trust_proxy:
+        xff = request.headers.get('X-Forwarded-For', '')
+        if xff:
+            parts = [p.strip() for p in xff.split(',') if p.strip()]
+            if parts:
+                return parts[0]
+    return remote or 'unknown'
 
 
 # ==================== CSRF PROTECTION ====================

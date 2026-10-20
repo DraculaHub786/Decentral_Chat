@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 
 <head>
     <meta charset="UTF-8">
@@ -7,15 +7,23 @@
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css?v=13">
     <script src="https://accounts.google.com/gsi/client" async defer onload="initializeGoogleSignIn()"></script>
-    <title>DecentralChat - Secure Messaging Platform</title>
+    <title>DecentralChat - Modern Decentralized Messaging</title>
 </head>
 
 <body>
 
-<!-- Toast Notification Container (always visible, works on all screens including mobile) -->
-<div id="toastContainer" style="position:fixed;bottom:100px;left:50%;transform:translateX(-50%);z-index:99999;display:flex;flex-direction:column;align-items:center;gap:8px;pointer-events:none;max-width:90%;width:auto;transition:all 0.3s ease;"></div>
+    <!-- Ambient Spatial Depth Elements (Progria Nova & FrsionOS Aesthetic) -->
+    <div class="spatial-orb orb-amber" aria-hidden="true"></div>
+    <div class="spatial-orb orb-violet" aria-hidden="true"></div>
+    <div class="spatial-orb orb-pearl" aria-hidden="true"></div>
+
+<!-- Toast Notification Container (managed by styles.css) -->
+<div id="toastContainer"></div>
 
     <!--Connection Status-->
     <div id="connectionStatus" class="connection-status">
@@ -25,15 +33,18 @@
 
     <!-- Login Screen -->
     <div id="loginScreen">
+        <button class="login-theme-btn" id="loginThemeToggleBtn" onclick="toggleTheme()" title="Toggle Dark/Light Theme" aria-label="Toggle Theme">
+            <span id="loginThemeIcon">🌙</span>
+        </button>
         <div class="login-container">
             <div class="logo-container">
-                <div class="logo">🔒</div>
+                <div class="logo">💬</div>
                 <h1 class="app-title">DecentralChat</h1>
-                <p class="app-subtitle">Secure • Decentralized • Private</p>
+                <p class="app-subtitle">Next-Gen • Private • Decentralized</p>
             </div>
 
             <div class="login-box glass">
-                <h2 id="authTitle" style="margin-bottom: 30px; font-size: 28px;">Welcome Back</h2>
+                <h2 id="authTitle" style="margin-bottom: 24px; font-size: 26px;">Welcome Back</h2>
 
                 <div id="errorMessage" class="error-message"></div>
                 <div id="successMessage" class="success-message"></div>
@@ -55,18 +66,18 @@
                         <label>Phone</label>
                         <div style="display: flex; gap: 10px;">
                             <select id="countryCode"
-                                style="width: 180px; padding: 15px; border: 1px solid rgba(218, 165, 32, 0.3); background: rgba(0, 0, 0, 0.4); border-radius: 10px; color: #fff; font-size: 14px;">
+                                style="width: 160px; padding: 14px; border: 1px solid var(--input-border); background: var(--input-bg); border-radius: 12px; color: var(--text-primary); font-size: 14px;">
                                 <option value="">Select Country</option>
                             </select>
                             <input type="tel" id="phone" placeholder="Phone number" style="flex: 1;" pattern="[0-9]*"
                                 inputmode="numeric" required>
                         </div>
-                        <div id="fullPhoneNumber" style="margin-top: 5px; font-size: 12px; color: #888;"></div>
+                        <div id="fullPhoneNumber" style="margin-top: 5px; font-size: 12px; color: var(--text-muted);"></div>
                     </div>
                     <div class="divider" style="margin: 20px 0;">
-                        <span style="flex: 1; height: 1px; background: rgba(218, 165, 32, 0.2);"></span>
-                        <span style="padding: 0 15px; color: #888; font-size: 13px;">OR</span>
-                        <span style="flex: 1; height: 1px; background: rgba(218, 165, 32, 0.2);"></span>
+                        <span></span>
+                        <span>OR</span>
+                        <span></span>
                     </div>
 
                     <button type="button" class="btn-google" onclick="signInWithGoogle()">
@@ -83,8 +94,8 @@
                         <span id="googleBtnText">Continue with Google</span>
                         <span id="googleBtnLoading" style="display: none;">Loading...</span>
                     </button>
-                    <button type="button" class="btn-primary" id="authSubmitBtn" onclick="handleAuthSubmit()"> <span
-                            id="authBtnText">Sign In</span>
+                    <button type="button" class="btn-primary" id="authSubmitBtn" onclick="handleAuthSubmit()">
+                        <span id="authBtnText">Sign In</span>
                         <span id="authBtnLoading" style="display: none;" class="loading"></span>
                     </button>
                 </form>
@@ -99,23 +110,73 @@
     <!-- Chat Interface -->
     <div id="chatInterface">
         <div class="chat-container">
-            <!-- Sidebar -->
-            <div class="sidebar glass" id="sidebar">
+            <!-- Left Navigation Rail (Mini Sidebar) -->
+            <nav class="nav-rail" id="navRail">
+                <div class="nav-rail-top">
+                    <div class="nav-avatar-wrap" onclick="openProfileSettings()" title="Your Profile">
+                        <div class="nav-avatar" id="navRailAvatar">👤</div>
+                        <span class="nav-status-dot online"></span>
+                    </div>
+                </div>
+                <div class="nav-rail-menu">
+                    <button class="nav-rail-btn active" id="navBtnChats" title="Chats" onclick="switchNavSection('chats')">
+                        <span class="nav-icon">💬</span>
+                    </button>
+                    <button class="nav-rail-btn" id="navBtnContacts" title="Contacts" onclick="switchNavSection('contacts')">
+                        <span class="nav-icon">👥</span>
+                    </button>
+                    <button class="nav-rail-btn" id="navBtnCalls" title="Call History" onclick="switchNavSection('calls')">
+                        <span class="nav-icon">📞</span>
+                    </button>
+                    <button class="nav-rail-btn" id="navBtnSettings" title="Settings" onclick="openProfileSettings()">
+                        <span class="nav-icon">⚙️</span>
+                    </button>
+                </div>
+                <div class="nav-rail-bottom">
+                    <button class="nav-rail-btn theme-toggle-btn" id="themeToggleBtn" title="Toggle Theme (Dark / Light)" onclick="toggleTheme()">
+                        <span class="nav-icon theme-icon" id="themeIcon">🌙</span>
+                    </button>
+                    <button class="nav-rail-btn logout-btn" id="logoutBtn" title="Log Out" aria-label="Log Out" onclick="logout()">
+                        <span class="nav-icon">🚪</span>
+                    </button>
+                </div>
+            </nav>
+
+            <!-- Sidebar (Chats Column) -->
+            <div class="sidebar" id="sidebar">
                 <div class="sidebar-header">
-                    <div class="user-profile">
+                    <div class="sidebar-header-top">
+                        <h2 class="sidebar-title">Chats</h2>
+                        <div class="sidebar-header-actions">
+                            <button class="icon-btn new-chat-btn" onclick="openNewChat()" title="New Chat" aria-label="New Chat">
+                                ✏️
+                            </button>
+                            <button class="icon-btn user-menu-btn" onclick="showUserMenu()" title="Menu" aria-label="Open user menu">
+                                ⋮
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- User Profile Bar in Sidebar Header -->
+                    <div class="user-profile" id="userProfileBar" onclick="openProfileSettings()" title="Click to view & edit Profile / Settings">
                         <div class="avatar" id="userAvatar">👤</div>
                         <div class="user-info">
                             <h3 id="currentUsername">User</h3>
-                            <p class="user-role" id="userRole">User</p>
+                            <p class="user-role" id="userRole">Online</p>
                         </div>
-                        <button class="icon-btn user-menu-btn" onclick="showUserMenu()" title="Menu" aria-label="Open user menu">
-                            ⋮
-                        </button>
+                        <button class="user-profile-settings-btn" title="Open Settings" onclick="event.stopPropagation(); openProfileSettings();" aria-label="Open Settings">⚙️</button>
                     </div>
+
                     <div class="search-box">
+                        <span class="search-icon">🔍</span>
                         <input type="text" id="searchContacts" placeholder="Search chats..."
-                            oninput="searchContacts(this.value)"
-                            style="width: 100%; padding: 12px 40px 12px 15px; background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(218, 165, 32, 0.3); border-radius: 10px; color: #fff; font-size: 14px;">
+                            oninput="searchContacts(this.value)">
+                    </div>
+                    <div class="chat-filters" id="chatFilters">
+                        <button class="chat-filter-chip active" data-filter="all" onclick="filterChatList('all')">All</button>
+                        <button class="chat-filter-chip" data-filter="direct" onclick="filterChatList('direct')">Direct</button>
+                        <button class="chat-filter-chip" data-filter="group" onclick="filterChatList('group')">Groups</button>
+                        <button class="chat-filter-chip" data-filter="unread" onclick="filterChatList('unread')">Unread</button>
                     </div>
                 </div>
 
@@ -137,9 +198,8 @@
             </div>
 
             <!-- Chat Area -->
-            <div class="chat-area glass">
+            <div class="chat-area">
                 <div id="emptyState" class="empty-state">
-                    <!-- ADD THIS BUTTON -->
                     <button class="menu-toggle" onclick="toggleSidebar()"
                         style="position: absolute; top: 20px; left: 20px; z-index: 10;">
                         ☰
@@ -155,9 +215,9 @@
                             <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
                             <div class="avatar" id="activeChatAvatar" style="cursor: pointer;"
                                 onclick="openChatAvatarViewer()">👤</div>
-                            <div>
+                            <div class="chat-header-info">
                                 <h3 id="activeChatName">Contact Name</h3>
-                                <p id="activeChatStatus" style="font-size: 12px; color: #888;">online</p>
+                                <p id="activeChatStatus">online</p>
                             </div>
                         </div>
                         <div class="chat-actions">
@@ -246,14 +306,14 @@
                                     🖼️
                                 </button>
                                 <!-- Hidden inputs for selection -->
-                                <input type="file" id="fileInput" multiple accept="*/*" style="display: none;" onchange="handleFileSelect(event)">
+                                <input type="file" id="fileInput" multiple accept="*/*" style="display: none;">
                                 <input type="file" id="imageInput" multiple accept="image/*,video/*"
-                                     style="display: none;" onchange="handleFileSelect(event)">
+                                     style="display: none;">
                                 <button class="icon-btn" onclick="toggleEmojiPicker()" title="Emoji"
                                     id="emojiBtn">😊</button>
 
                             </div>
-                            <textarea id="messageInput" placeholder="Type a message..." rows="1"></textarea>
+                            <textarea id="messageInput" placeholder="Type your message here..." rows="1"></textarea>
 
                             <!-- Send button (hidden by default, shown when text exists) -->
                             <button class="send-btn" onclick="sendMessage()" id="sendBtn"
@@ -301,8 +361,8 @@
     </div>
 
     <!-- Hidden inputs for video/audio (rarely used directly) -->
-    <input type="file" id="videoInput" accept="video/*" style="display:none;" onchange="handleFileSelect(event)">
-    <input type="file" id="audioInput" accept="audio/*" style="display:none;" onchange="handleFileSelect(event)">
+    <input type="file" id="videoInput" accept="video/*" style="display:none;">
+    <input type="file" id="audioInput" accept="audio/*" style="display:none;">
 
     <!-- Call Overlay -->
     <div id="callOverlay" class="call-overlay">
@@ -375,63 +435,66 @@
 
     <!-- Phone Verification Modal -->
     <div id="phoneVerificationModal" class="modal">
-        <div class="modal-content glass-strong">
+        <div class="modal-content glass-strong" style="max-width: 480px;">
             <div class="modal-header">
                 <h2 class="modal-title">📱 Verify Phone Number</h2>
                 <button class="close-btn" onclick="closeModal('phoneVerificationModal')">✕</button>
             </div>
-
-            <div id="phoneVerificationStep1">
-                <div class="form-group">
-                    <label>Phone Number</label>
-                    <input type="tel" id="phoneVerificationInput" placeholder="+1234567890">
+            <div class="modal-scroll-body">
+                <div id="phoneVerificationStep1">
+                    <div class="form-group">
+                        <label>Phone Number</label>
+                        <input type="tel" id="phoneVerificationInput" placeholder="+1234567890">
+                    </div>
+                    <button class="btn-primary" onclick="sendPhoneVerification()" style="width: 100%; margin-top: 6px;">Send Code</button>
                 </div>
-                <button class="btn-primary" onclick="sendPhoneVerification()">Send Code</button>
-            </div>
 
-            <div id="phoneVerificationStep2" style="display: none;">
-                <p style="margin-bottom: 20px; color: #888;">
-                    We sent a verification code to <strong id="verificationPhone"></strong>
-                </p>
-                <div class="form-group">
-                    <label>Verification Code</label>
-                    <input type="text" id="phoneVerificationCode" placeholder="Enter 6-digit code" maxlength="6">
+                <div id="phoneVerificationStep2" style="display: none;">
+                    <p style="margin-bottom: 20px; color: var(--text-secondary); font-size: 14px;">
+                        We sent a verification code to <strong id="verificationPhone" style="color: var(--accent-amber);"></strong>
+                    </p>
+                    <div class="form-group">
+                        <label>Verification Code</label>
+                        <input type="text" id="phoneVerificationCode" placeholder="Enter 6-digit code" maxlength="6">
+                    </div>
+                    <button class="btn-primary" onclick="verifyPhoneCode()" style="width: 100%; margin-top: 6px;">Verify</button>
+                    <button class="action-btn" onclick="sendPhoneVerification()" style="margin-top: 10px; width: 100%;">
+                        Resend Code
+                    </button>
                 </div>
-                <button class="btn-primary" onclick="verifyPhoneCode()">Verify</button>
-                <button class="action-btn" onclick="sendPhoneVerification()" style="margin-top: 10px;">
-                    Resend Code
-                </button>
             </div>
         </div>
     </div>
 
     <!-- Add Contact Modal -->
     <div id="addContactModal" class="modal">
-        <div class="modal-content glass-strong">
+        <div class="modal-content glass-strong" style="max-width: 500px;">
             <div class="modal-header">
                 <h2 class="modal-title">👤 Add Contact</h2>
                 <button class="close-btn" onclick="closeModal('addContactModal')">✕</button>
             </div>
-            <div class="form-group">
-                <label>Search by Username, Email or Phone</label>
-                <input type="text" id="contactSearchInput" placeholder="Enter username, email or phone">
-            </div>
-            <button class="btn-primary" onclick="searchAndAddContact()">Search & Add</button>
+            <div class="modal-scroll-body">
+                <div class="form-group">
+                    <label>Search by Username, Email or Phone</label>
+                    <input type="text" id="contactSearchInput" placeholder="Enter username, email or phone">
+                </div>
+                <button class="btn-primary" onclick="searchAndAddContact()" style="width: 100%;">Search & Add</button>
 
-            <div id="addContactSearchResults" class="user-list" style="margin-top: 20px; display: none;">
-                <!-- Search results will appear here -->
+                <div id="addContactSearchResults" class="user-list" style="margin-top: 20px; display: none; padding: 0;">
+                    <!-- Search results will appear here -->
+                </div>
             </div>
         </div>
     </div>
 
     <!-- New Chat Modal -->
     <div id="newChatModal" class="modal">
-        <div class="modal-content glass-strong">
+        <div class="modal-content glass-strong" style="max-width: 520px; max-height: 82vh;">
             <div class="modal-header">
                 <h2 class="modal-title">💬 New Chat</h2>
                 <button class="close-btn" onclick="closeModal('newChatModal')">✕</button>
             </div>
-            <div id="contactsForChat" class="user-list">
+            <div id="contactsForChat" class="modal-scroll-body user-list">
                 <!-- Contacts will be loaded here -->
             </div>
         </div>
@@ -439,37 +502,39 @@
 
     <!-- Create Group Modal -->
     <div id="createGroupModal" class="modal">
-        <div class="modal-content glass-strong">
+        <div class="modal-content glass-strong" style="max-width: 520px; max-height: 85vh;">
             <div class="modal-header">
                 <h2 class="modal-title">👥 Create Group</h2>
                 <button class="close-btn" onclick="closeModal('createGroupModal')">✕</button>
             </div>
-            <div class="form-group">
-                <label>Group Name</label>
-                <input type="text" id="groupName" placeholder="Enter group name">
-            </div>
-            <div class="form-group">
-                <label>Description (Optional)</label>
-                <input type="text" id="groupDescription" placeholder="Group description">
-            </div>
-            <div class="form-group">
-                <label>Select Members</label>
-                <div id="createGroupMembersList" class="group-members-list">
-                    <!-- Contact checkboxes will be loaded here -->
+            <div class="modal-scroll-body">
+                <div class="form-group">
+                    <label>Group Name</label>
+                    <input type="text" id="groupName" placeholder="Enter group name">
                 </div>
+                <div class="form-group">
+                    <label>Description (Optional)</label>
+                    <input type="text" id="groupDescription" placeholder="Group description">
+                </div>
+                <div class="form-group">
+                    <label>Select Members</label>
+                    <div id="createGroupMembersList" class="group-members-list">
+                        <!-- Contact checkboxes will be loaded here -->
+                    </div>
+                </div>
+                <button class="btn-primary" onclick="createGroup()" style="width: 100%; margin-top: 10px;">Create Group</button>
             </div>
-            <button class="btn-primary" onclick="createGroup()">Create Group</button>
         </div>
     </div>
 
     <!-- Call History Modal -->
     <div id="callHistoryModal" class="modal">
-        <div class="modal-content glass-strong">
+        <div class="modal-content glass-strong" style="max-width: 540px; max-height: 82vh;">
             <div class="modal-header">
                 <h2 class="modal-title">📞 Call History</h2>
                 <button class="close-btn" onclick="closeModal('callHistoryModal')">✕</button>
             </div>
-            <div id="callHistoryList" class="user-list">
+            <div id="callHistoryList" class="modal-scroll-body user-list">
                 <!-- Call history will be loaded here -->
             </div>
         </div>
@@ -477,12 +542,12 @@
 
     <!-- Contacts Manager Modal -->
     <div id="contactsManagerModal" class="modal">
-        <div class="modal-content glass-strong">
+        <div class="modal-content glass-strong" style="max-width: 540px; max-height: 82vh;">
             <div class="modal-header">
                 <h2 class="modal-title">👥 Contacts</h2>
                 <button class="close-btn" onclick="closeModal('contactsManagerModal')">✕</button>
             </div>
-            <div id="contactsManagerList" class="user-list">
+            <div id="contactsManagerList" class="modal-scroll-body user-list">
                 <!-- Contacts will be loaded here -->
             </div>
         </div>
@@ -490,74 +555,64 @@
 
     <!-- Settings Modal -->
     <div id="settingsModal" class="modal">
-        <div class="modal-content glass-strong" style="max-width: 580px; max-height: 88vh; overflow-y: auto;">
-            <div class="modal-header" style="padding-bottom: 14px;">
-                <h2 class="modal-title" style="font-size: 20px;">⚙️ Settings</h2>
+        <div class="modal-content glass-strong" style="max-width: 600px; max-height: 88vh;">
+            <div class="modal-header">
+                <h2 class="modal-title">⚙️ Settings</h2>
                 <button class="close-btn" onclick="closeModal('settingsModal')">✕</button>
             </div>
 
-            <div style="padding: 0 4px 4px;">
+            <!-- Pinned Tab Bar -->
+            <div class="settings-tabs">
+                <button class="settings-tab-btn active" onclick="switchSettingsTab('profile',this)">👤 Profile</button>
+                <button class="settings-tab-btn" onclick="switchSettingsTab('privacy',this)">🔒 Privacy</button>
+                <button class="settings-tab-btn" onclick="switchSettingsTab('security',this)">🛡️ Security</button>
+            </div>
 
-                <!-- Tab Bar -->
-                <div class="settings-tabs">
-                    <button class="settings-tab-btn active" onclick="switchSettingsTab('profile',this)">👤
-                        Profile</button>
-                    <button class="settings-tab-btn" onclick="switchSettingsTab('privacy',this)">🔒 Privacy</button>
-                    <button class="settings-tab-btn" onclick="switchSettingsTab('security',this)">🛡️ Security</button>
-                </div>
-
+            <!-- Inset Scroll Body (Clips safely inside 32px rounded corners with zero scrollbar spillover) -->
+            <div class="modal-scroll-body">
                 <!-- ─── Profile Tab ─────────────────────────────── -->
                 <div id="settingsTab-profile" class="settings-tab-panel active">
 
                     <!-- Avatar -->
-                    <div style="text-align: center; padding: 8px 0 20px;">
-                        <div class="avatar-preview" id="settingsAvatarPreview"
-                            onclick="document.getElementById('avatarUpload').click()" title="Change photo">
-                            👤
-                            <div class="avatar-hover-overlay">
-                                📷
-                                <span>Change</span>
+                    <div style="text-align: center; padding: 12px 0 20px;">
+                        <div class="avatar-preview-wrapper">
+                            <div class="avatar-preview" id="settingsAvatarPreview"
+                                onclick="document.getElementById('avatarUpload').click()" title="Change photo">
+                                👤
+                                <div class="avatar-hover-overlay">
+                                    📷
+                                    <span>Change</span>
+                                </div>
                             </div>
-                            <div class="avatar-upload-btn">📷</div>
+                            <div class="avatar-upload-badge" onclick="document.getElementById('avatarUpload').click()" title="Change photo">
+                                📷
+                            </div>
                         </div>
                         <input type="file" id="avatarUpload" accept="image/*" style="display: none;">
-                        <p style="font-size: 12px; color: #8A8479; margin: 0;">Tap to change photo</p>
+                        <p style="font-size: 12px; color: var(--text-muted); margin: 0;">Tap to change photo</p>
                     </div>
 
                     <!-- Identity Section -->
                     <div class="settings-section">
                         <div class="settings-section-header">
-                            <div class="settings-section-icon purple">👤</div>
+                            <div class="settings-section-icon">👤</div>
                             <h3>Identity</h3>
                         </div>
 
-                        <div style="padding: 16px 20px; display: flex; flex-direction: column; gap: 14px;">
+                        <div style="display: flex; flex-direction: column; gap: 14px;">
                             <div class="form-group" style="margin: 0;">
-                                <label
-                                    style="font-size: 12px; color: #8A8479; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 700; margin-bottom: 7px; display: block;">Username</label>
-                                <input type="text" id="settingsUsername" placeholder="Your username"
-                                    style="background: rgba(0,0,0,0.3); border: 1.5px solid rgba(226, 163, 62,0.15); border-radius: 10px; color: #EDE9E2; padding: 11px 14px; width: 100%; font-size: 15px; transition: border-color 0.2s;"
-                                    onfocus="this.style.borderColor='rgba(226, 163, 62,0.4)'"
-                                    onblur="this.style.borderColor='rgba(226, 163, 62,0.15)'">
+                                <label>Username</label>
+                                <input type="text" id="settingsUsername" placeholder="Your username">
                             </div>
 
                             <div class="form-group" style="margin: 0;">
-                                <label
-                                    style="font-size: 12px; color: #8A8479; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 700; margin-bottom: 7px; display: block;">Email
-                                    <span
-                                        style="color: #6b5070; font-weight: 600; font-size: 11px; text-transform: none; letter-spacing: 0;">·
-                                        Cannot be changed</span></label>
-                                <input type="email" id="settingsEmail" placeholder="your@email.com" readonly
-                                    style="background: rgba(0,0,0,0.2); border: 1.5px solid rgba(226, 163, 62,0.08); border-radius: 10px; color: rgba(200,180,200,0.5); padding: 11px 14px; width: 100%; font-size: 15px; cursor: not-allowed;">
+                                <label>Email <span style="color: var(--text-muted); font-weight: 500; font-size: 11px; text-transform: none;">· Cannot be changed</span></label>
+                                <input type="email" id="settingsEmail" placeholder="your@email.com" readonly style="opacity: 0.65; cursor: not-allowed;">
                             </div>
 
                             <div class="form-group" style="margin: 0;">
-                                <label
-                                    style="font-size: 12px; color: #8A8479; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 700; margin-bottom: 7px; display: block;">Bio</label>
-                                <textarea id="settingsBio" placeholder="Tell people a little about yourself…" rows="3"
-                                    style="width: 100%; padding: 11px 14px; background: rgba(0,0,0,0.3); border: 1.5px solid rgba(226, 163, 62,0.15); border-radius: 10px; color: #EDE9E2; resize: vertical; font-family: inherit; font-size: 15px; transition: border-color 0.2s;"
-                                    onfocus="this.style.borderColor='rgba(226, 163, 62,0.4)'"
-                                    onblur="this.style.borderColor='rgba(226, 163, 62,0.15)'"></textarea>
+                                <label>Bio</label>
+                                <textarea id="settingsBio" placeholder="Tell people a little about yourself…" rows="3"></textarea>
                             </div>
                         </div>
                     </div>
@@ -565,29 +620,45 @@
                     <!-- Phone Section -->
                     <div class="settings-section">
                         <div class="settings-section-header">
-                            <div class="settings-section-icon teal">📱</div>
+                            <div class="settings-section-icon">📱</div>
                             <h3>Phone</h3>
                         </div>
-                        <div style="padding: 14px 20px;">
-                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
-                                <div>
-                                    <div id="settingsPhone" style="font-size: 15px; color: #C97A3D; font-weight: 600;">
-                                        Not verified</div>
-                                    <div style="font-size: 12px; color: #8A8479; margin-top: 3px;">
-                                        <span id="phoneVerificationStatus"></span>
-                                    </div>
+                        <div class="setting-item" style="border-bottom: none; padding: 4px 0 0;">
+                            <div class="setting-item-icon">📱</div>
+                            <div class="setting-item-text">
+                                <div id="settingsPhone" class="setting-label" style="color: var(--accent-amber);">Not set</div>
+                                <div class="setting-description">
+                                    <span id="phoneVerificationStatus">❌ Not verified</span>
                                 </div>
-                                <button class="action-btn"
-                                    onclick="openPhoneVerification(); closeModal('settingsModal');"
-                                    style="font-size: 13px; padding: 9px 18px; white-space: nowrap; flex-shrink: 0;">
-                                    Verify →
-                                </button>
                             </div>
+                            <button class="action-btn"
+                                onclick="openPhoneVerification(); closeModal('settingsModal');"
+                                style="width: auto; min-width: 0; max-width: fit-content; padding: 8px 18px; margin-left: auto; flex-shrink: 0;">
+                                Verify →
+                            </button>
                         </div>
                     </div>
 
-                    <button class="btn-primary" onclick="saveSettings()" style="margin-bottom: 4px; width: 100%;">💾
-                        Save Profile</button>
+                    <!-- Appearance & Theme Section -->
+                    <div class="settings-section">
+                        <div class="settings-section-header">
+                            <div class="settings-section-icon">🎨</div>
+                            <h3>Appearance & Theme</h3>
+                        </div>
+                        <div class="setting-item">
+                            <div class="setting-item-icon">🎨</div>
+                            <div class="setting-item-text">
+                                <div class="setting-label">Dark Theme</div>
+                                <div class="setting-description">Switch between Cyber Obsidian and Alabaster Spatial Glass themes</div>
+                            </div>
+                            <label class="switch">
+                                <input type="checkbox" id="settingsThemeToggle" onchange="toggleTheme(this.checked ? 'dark' : 'light')" checked>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <button class="btn-primary" onclick="saveSettings()" style="margin-top: 10px; margin-bottom: 8px; width: 100%;">💾 Save Profile</button>
                 </div>
 
                 <!-- ─── Privacy Tab ──────────────────────────────── -->
@@ -740,7 +811,7 @@
     <div id="contextMenuBackdrop" class="context-menu-backdrop"></div>
 
     <!-- Update Message Context Menu -->
-    <div id="messageContextMenu" class="message-context-menu">
+    <div id="messageContextMenu" class="message-context-menu" style="display: none;">
         <div class="context-menu-handle" style="display: none;"></div>
 
         <div class="context-menu-item" onclick="copyMessage()">
@@ -785,71 +856,72 @@
                 <button class="close-btn" onclick="cancelEdit()">✕</button>
             </div>
 
-            <div class="form-group">
-                <label>Message</label>
-                <textarea id="editMessageText" rows="4" placeholder="Type your message..."
-                    style="width: 100%; padding: 12px; background: rgba(0,0,0,0.4); border: 1px solid rgba(218,165,32,0.3); border-radius: 10px; color: #fff; resize: vertical; font-family: inherit; font-size: 15px;"></textarea>
-            </div>
+            <div class="modal-scroll-body">
+                <div class="form-group">
+                    <label>Message</label>
+                    <textarea id="editMessageText" rows="4" placeholder="Type your message..."></textarea>
+                </div>
 
-            <div style="display: flex; gap: 10px;">
-                <button class="btn-primary" onclick="saveEditedMessage()" style="flex: 1;">💾 Save</button>
-                <button class="action-btn" onclick="cancelEdit()"
-                    style="flex: 1; background: rgba(229, 72, 77,0.2); border-color: rgba(229, 72, 77,0.4); color: #F0787C;">Cancel</button>
+                <div style="display: flex; gap: 12px; margin-top: 14px;">
+                    <button class="btn-primary" onclick="saveEditedMessage()" style="flex: 1;">💾 Save</button>
+                    <button class="action-btn" onclick="cancelEdit()"
+                        style="flex: 1; background: rgba(229, 72, 77, 0.15); border-color: rgba(229, 72, 77, 0.35); color: #F0787C;">Cancel</button>
+                </div>
             </div>
         </div>
     </div>
 
     <!-- Forward Message Modal -->
     <div id="forwardMessageModal" class="modal">
-        <div class="modal-content glass-strong"
-            style="max-width: 500px; max-height: 80vh; display: flex; flex-direction: column;">
+        <div class="modal-content glass-strong" style="max-width: 520px; max-height: 85vh;">
             <div class="modal-header">
                 <h2 class="modal-title">↗️ Forward Message</h2>
                 <button class="close-btn" onclick="closeModal('forwardMessageModal')">✕</button>
             </div>
 
-            <!-- Search box for chats -->
-            <div class="form-group" style="margin-bottom: 15px;">
-                <input type="text" id="forwardSearchInput" placeholder="🔍 Search chats..."
-                    oninput="filterForwardChats(this.value)"
-                    style="width: 100%; padding: 12px; background: rgba(0,0,0,0.4); border: 1px solid rgba(218,165,32,0.3); border-radius: 10px; color: #fff; font-size: 14px;">
-            </div>
+            <div class="modal-scroll-body">
+                <!-- Search box for chats -->
+                <div class="form-group" style="margin-bottom: 12px;">
+                    <input type="text" id="forwardSearchInput" placeholder="🔍 Search chats..."
+                        oninput="filterForwardChats(this.value)">
+                </div>
 
-            <!-- Selected chats indicator -->
-            <div id="forwardSelectedCount"
-                style="display: none; padding: 10px; background: rgba(218, 165, 32, 0.1); border-radius: 8px; margin-bottom: 15px; color: #DAA520; font-size: 14px; text-align: center;">
-                <span id="forwardSelectedCountText">0 chats selected</span>
-            </div>
+                <!-- Selected chats indicator -->
+                <div id="forwardSelectedCount"
+                    style="display: none; padding: 10px 14px; background: var(--accent-amber-subtle); border: 1px solid var(--accent-amber-border); border-radius: 14px; margin-bottom: 12px; color: var(--accent-amber); font-size: 13.5px; text-align: center; font-weight: 600;">
+                    <span id="forwardSelectedCountText">0 chats selected</span>
+                </div>
 
-            <!-- Chats list -->
-            <div id="forwardChatsList" class="user-list"
-                style="flex: 1; overflow-y: auto; max-height: 400px; margin-bottom: 15px;">
-                <!-- Chats will be loaded here -->
-            </div>
+                <!-- Chats list -->
+                <div id="forwardChatsList" class="user-list"
+                    style="flex: 1; overflow-y: auto; max-height: 380px; margin-bottom: 16px; padding: 0;">
+                    <!-- Chats will be loaded here -->
+                </div>
 
-            <!-- Forward button -->
-            <button class="btn-primary" onclick="confirmForward()" id="forwardButton" disabled style="opacity: 0.5;">
-                <span id="forwardButtonText">↗️ Forward</span>
-                <span id="forwardButtonLoading" style="display: none;">Forwarding...</span>
-            </button>
+                <!-- Forward button -->
+                <button class="btn-primary" onclick="confirmForward()" id="forwardButton" disabled style="width: 100%; opacity: 0.5;">
+                    <span id="forwardButtonText">↗️ Forward</span>
+                    <span id="forwardButtonLoading" style="display: none;">Forwarding...</span>
+                </button>
+            </div>
         </div>
     </div>
 
     <!-- Chat Info/Settings Modal -->
     <div id="chatMenuModal" class="modal">
-        <div class="modal-content glass-strong" style="max-width: 500px; max-height: 85vh; overflow-y: auto;">
+        <div class="modal-content glass-strong" style="max-width: 520px; max-height: 88vh;">
             <div class="modal-header">
                 <h2 class="modal-title">💬 Chat Info</h2>
                 <button class="close-btn" onclick="closeModal('chatMenuModal')">✕</button>
             </div>
 
-            <div style="padding: 0 5px;">
+            <div class="modal-scroll-body">
                 <!-- Chat Avatar/Name -->
-                <div style="text-align: center; padding: 20px 0;">
+                <div style="text-align: center; padding: 10px 0 20px;">
                     <div id="chatMenuAvatar" class="avatar"
-                        style="width: 100px; height: 100px; font-size: 48px; margin: 0 auto 15px;">👤</div>
-                    <h3 id="chatMenuName" style="font-size: 24px; margin-bottom: 5px;">Chat Name</h3>
-                    <p id="chatMenuType" style="color: #888; font-size: 14px;">Direct Chat</p>
+                        style="width: 88px; height: 88px; font-size: 42px; margin: 0 auto 14px; border-radius: 26px; border: 2px solid var(--glass-border); box-shadow: var(--accent-violet-glow);">👤</div>
+                    <h3 id="chatMenuName" style="font-size: 22px; font-weight: 700; margin-bottom: 4px; color: var(--text-primary);">Chat Name</h3>
+                    <p id="chatMenuType" style="color: var(--text-secondary); font-size: 13.5px; font-weight: 500;">Direct Chat</p>
                 </div>
 
                 <!-- Chat Actions -->
@@ -872,7 +944,7 @@
                             <div class="setting-label">📎 Media & Files</div>
                             <div class="setting-description">View shared photos, videos, and documents</div>
                         </div>
-                        <span style="color: #888;">→</span>
+                        <span style="color: var(--text-muted); font-size: 16px;">→</span>
                     </div>
 
                     <div class="setting-item" onclick="searchInChat()">
@@ -880,7 +952,7 @@
                             <div class="setting-label">🔍 Search Messages</div>
                             <div class="setting-description">Find messages in this chat</div>
                         </div>
-                        <span style="color: #888;">→</span>
+                        <span style="color: var(--text-muted); font-size: 16px;">→</span>
                     </div>
                 </div>
 
@@ -893,7 +965,7 @@
                             <div class="setting-label">👥 Members</div>
                             <div class="setting-description" id="memberCount">0 members</div>
                         </div>
-                        <span style="color: #888;">→</span>
+                        <span style="color: var(--text-muted); font-size: 16px;">→</span>
                     </div>
 
                     <div class="setting-item" onclick="editGroupInfo()">
@@ -901,13 +973,13 @@
                             <div class="setting-label">✏️ Edit Group Info</div>
                             <div class="setting-description">Change name, photo, and description</div>
                         </div>
-                        <span style="color: #888;">→</span>
+                        <span style="color: var(--text-muted); font-size: 16px;">→</span>
                     </div>
                 </div>
 
                 <!-- Danger Zone -->
-                <div class="settings-section">
-                    <h3>Danger Zone</h3>
+                <div class="settings-section danger-section" style="margin-top: 18px;">
+                    <h3 style="color: var(--status-busy);">Danger Zone</h3>
 
                     <div class="setting-item" onclick="clearChatHistory()" style="cursor: pointer;">
                         <div>
@@ -937,29 +1009,24 @@
 
     <!-- Media & Files Modal -->
     <div id="mediaFilesModal" class="modal">
-        <div class="modal-content glass-strong" style="max-width: 800px; max-height: 85vh; overflow-y: auto;">
+        <div class="modal-content glass-strong" style="max-width: 820px; max-height: 88vh;">
             <div class="modal-header">
                 <h2 class="modal-title">📎 Media & Files</h2>
                 <button class="close-btn" onclick="closeModal('mediaFilesModal')">✕</button>
             </div>
 
             <!-- Filter Tabs -->
-            <div
-                style="display: flex; gap: 10px; padding: 0 20px 15px; border-bottom: 1px solid rgba(218, 165, 32, 0.2);">
+            <div class="media-filter-bar">
                 <button class="media-filter-btn active" data-filter="all" onclick="filterMediaFiles('all')">All</button>
-                <button class="media-filter-btn" data-filter="image" onclick="filterMediaFiles('image')">📷
-                    Photos</button>
-                <button class="media-filter-btn" data-filter="video" onclick="filterMediaFiles('video')">🎥
-                    Videos</button>
-                <button class="media-filter-btn" data-filter="audio" onclick="filterMediaFiles('audio')">🎵
-                    Audio</button>
-                <button class="media-filter-btn" data-filter="document" onclick="filterMediaFiles('document')">📄
-                    Documents</button>
+                <button class="media-filter-btn" data-filter="image" onclick="filterMediaFiles('image')">📷 Photos</button>
+                <button class="media-filter-btn" data-filter="video" onclick="filterMediaFiles('video')">🎥 Videos</button>
+                <button class="media-filter-btn" data-filter="audio" onclick="filterMediaFiles('audio')">🎵 Audio</button>
+                <button class="media-filter-btn" data-filter="document" onclick="filterMediaFiles('document')">📄 Documents</button>
             </div>
 
-            <!-- Media Grid -->
-            <div id="mediaGrid" style="padding: 20px;">
-                <div style="text-align: center; color: #888; padding: 40px;">
+            <!-- Media Grid Body -->
+            <div id="mediaGrid" class="modal-scroll-body">
+                <div style="text-align: center; color: var(--text-muted); padding: 40px;">
                     <div class="loading"></div>
                     <p style="margin-top: 15px;">Loading media...</p>
                 </div>
@@ -969,25 +1036,25 @@
 
     <!-- Search Messages Modal -->
     <div id="searchMessagesModal" class="modal">
-        <div class="modal-content glass-strong"
-            style="max-width: 600px; max-height: 85vh; display: flex; flex-direction: column;">
+        <div class="modal-content glass-strong" style="max-width: 620px; max-height: 88vh;">
             <div class="modal-header">
                 <h2 class="modal-title">🔍 Search Messages</h2>
                 <button class="close-btn" onclick="closeModal('searchMessagesModal')">✕</button>
             </div>
 
-            <!-- Search Input -->
-            <div style="padding: 0 20px 15px;">
-                <input type="text" id="messageSearchInput" placeholder="Search for messages..."
-                    oninput="searchMessages(this.value)"
-                    style="width: 100%; padding: 12px 15px; background: rgba(0,0,0,0.4); border: 1px solid rgba(218,165,32,0.3); border-radius: 10px; color: #fff; font-size: 14px;">
+            <!-- Search Input Container -->
+            <div style="padding: 16px 24px 12px; border-bottom: 1px solid var(--glass-border-subtle); flex-shrink: 0;">
+                <input type="text" id="messageSearchInput" placeholder="Search for messages in this conversation..."
+                    oninput="searchMessages(this.value)">
             </div>
-            <div id="search-results" class="search-results"></div>
-            <!-- Search Results -->
-            <div id="searchResults" style="flex: 1; overflow-y: auto; padding: 0 20px 20px;">
-                <div style="text-align: center; color: #888; padding: 40px;">
-                    <p style="font-size: 40px; margin-bottom: 10px;">🔍</p>
-                    <p>Type to search messages</p>
+
+            <!-- Search Results Body -->
+            <div id="searchResults" class="modal-scroll-body">
+                <div id="search-results" class="search-results">
+                    <div style="text-align: center; color: var(--text-muted); padding: 40px;">
+                        <p style="font-size: 40px; margin-bottom: 10px;">🔍</p>
+                        <p>Type to search messages</p>
+                    </div>
                 </div>
             </div>
         </div>
@@ -995,41 +1062,42 @@
 
     <!-- Group Members Modal -->
     <div id="groupMembersModal" class="modal">
-        <div class="modal-content glass-strong" style="max-width: 500px; max-height: 85vh; overflow-y: auto;">
+        <div class="modal-content glass-strong" style="max-width: 520px; max-height: 88vh;">
             <div class="modal-header">
                 <h2 class="modal-title">👥 Group Members</h2>
                 <button class="close-btn" onclick="closeModal('groupMembersModal')">✕</button>
             </div>
 
-            <div id="groupMembersList" style="padding: 0 20px 20px;">
-                <div style="text-align: center; color: #888; padding: 40px;">
+            <div id="groupMembersList" class="modal-scroll-body">
+                <div style="text-align: center; color: var(--text-muted); padding: 40px;">
                     <div class="loading"></div>
                     <p style="margin-top: 15px;">Loading members...</p>
                 </div>
             </div>
 
-            <div style="padding: 0 20px 20px;">
-                <button class="btn-primary" onclick="showAddMembersDialog()">➕ Add Members</button>
+            <div class="modal-footer" style="padding: 16px 24px;">
+                <button class="btn-primary" onclick="showAddMembersDialog()" style="width: 100%;">➕ Add Members</button>
             </div>
         </div>
     </div>
 
     <!-- Edit Group Modal -->
     <div id="editGroupModal" class="modal">
-        <div class="modal-content glass-strong" style="max-width: 500px;">
+        <div class="modal-content glass-strong" style="max-width: 520px;">
             <div class="modal-header">
                 <h2 class="modal-title">✏️ Edit Group Info</h2>
                 <button class="close-btn" onclick="closeModal('editGroupModal')">✕</button>
             </div>
 
-            <div style="padding: 0 20px 20px;">
-                <div style="text-align: center; margin-bottom: 20px;">
+            <div class="modal-scroll-body">
+                <div style="text-align: center; margin-bottom: 22px;">
                     <div id="editGroupAvatar" class="avatar"
-                        style="width: 100px; height: 100px; font-size: 48px; margin: 0 auto;">
+                        style="width: 88px; height: 88px; font-size: 42px; margin: 0 auto; border-radius: 26px; border: 2px solid var(--glass-border); box-shadow: var(--accent-violet-glow);">
                         👥
                     </div>
                     <button onclick="document.getElementById('groupAvatarUpload').click()"
-                        style="margin-top: 10px; padding: 8px 16px; background: rgba(218,165,32,0.2); border: 1px solid rgba(218,165,32,0.3); border-radius: 8px; color: #DAA520; cursor: pointer;">
+                        class="action-btn"
+                        style="margin-top: 12px; display: inline-flex; align-items: center; gap: 8px; padding: 8px 18px;">
                         📷 Change Photo
                     </button>
                     <input type="file" id="groupAvatarUpload" accept="image/*" style="display: none;">
@@ -1037,34 +1105,30 @@
 
                 <div class="form-group">
                     <label>Group Name</label>
-                    <input type="text" id="editGroupName" placeholder="Enter group name"
-                        style="width: 100%; padding: 12px; background: rgba(0,0,0,0.4); border: 1px solid rgba(218,165,32,0.3); border-radius: 10px; color: #fff;">
+                    <input type="text" id="editGroupName" placeholder="Enter group name">
                 </div>
 
                 <div class="form-group">
                     <label>Description</label>
-                    <textarea id="editGroupDescription" placeholder="Group description (optional)" rows="3"
-                        style="width: 100%; padding: 12px; background: rgba(0,0,0,0.4); border: 1px solid rgba(218,165,32,0.3); border-radius: 10px; color: #fff; resize: vertical; font-family: inherit;"></textarea>
+                    <textarea id="editGroupDescription" placeholder="Group description (optional)" rows="3"></textarea>
                 </div>
 
-                <button class="btn-primary" onclick="saveGroupChanges()">💾 Save Changes</button>
+                <button class="btn-primary" onclick="saveGroupChanges()" style="width: 100%; margin-top: 8px;">💾 Save Changes</button>
             </div>
         </div>
     </div>
 
     <!-- Custom Alert Modal -->
     <div id="customAlertModal" class="modal" style="z-index: 10000;">
-        <div class="modal-content glass-strong"
-            style="max-width: 450px; animation: modalSlideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);">
+        <div class="modal-content glass-strong" style="max-width: 450px;">
             <div class="modal-header">
                 <h2 class="modal-title" id="customAlertTitle">Notice</h2>
                 <button class="close-btn" onclick="closeCustomAlert()">✕</button>
             </div>
-            <div class="modal-body" id="customAlertMessage"
-                style="padding: 20px; color: #EDE9E2; line-height: 1.6; white-space: pre-wrap;">
+            <div class="modal-scroll-body" id="customAlertMessage"
+                style="color: var(--text-primary); line-height: 1.6; white-space: pre-wrap; font-size: 15px;">
             </div>
-            <div class="modal-footer"
-                style="display: flex; justify-content: flex-end; padding: 15px 20px; border-top: 1px solid rgba(226, 163, 62, 0.12);">
+            <div class="modal-footer">
                 <button class="btn-primary" onclick="closeCustomAlert()" style="min-width: 100px;">OK</button>
             </div>
         </div>
@@ -1072,19 +1136,17 @@
 
     <!-- Custom Confirm Modal -->
     <div id="customConfirmModal" class="modal" style="z-index: 10000;">
-        <div class="modal-content glass-strong"
-            style="max-width: 450px; animation: modalSlideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);">
+        <div class="modal-content glass-strong" style="max-width: 450px;">
             <div class="modal-header">
                 <h2 class="modal-title" id="customConfirmTitle">Confirm</h2>
                 <button class="close-btn" onclick="closeCustomConfirm(false)">✕</button>
             </div>
-            <div class="modal-body" id="customConfirmMessage"
-                style="padding: 20px; color: #EDE9E2; line-height: 1.6; white-space: pre-wrap;">
+            <div class="modal-scroll-body" id="customConfirmMessage"
+                style="color: var(--text-primary); line-height: 1.6; white-space: pre-wrap; font-size: 15px;">
             </div>
-            <div class="modal-footer"
-                style="display: flex; justify-content: flex-end; gap: 10px; padding: 15px 20px; border-top: 1px solid rgba(226, 163, 62, 0.12);">
+            <div class="modal-footer">
                 <button class="btn-secondary" onclick="closeCustomConfirm(false)"
-                    style="min-width: 100px; background: rgba(100, 100, 100, 0.3); border: 1px solid rgba(226, 163, 62, 0.2);">Cancel</button>
+                    style="min-width: 100px;">Cancel</button>
                 <button class="btn-primary" onclick="closeCustomConfirm(true)"
                     style="min-width: 100px;">Confirm</button>
             </div>
@@ -1092,7 +1154,8 @@
     </div>
 
 
-<script src="app.js"></script>
+<script src="app.js?v=13"></script>
 </body>
 
 </html>
+

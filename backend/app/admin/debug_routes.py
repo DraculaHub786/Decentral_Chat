@@ -1,4 +1,4 @@
-from typing import Dict, Set, Optional, List
+from typing import Dict, Set, Optional, List, Any
 from aiohttp import web
 import aiohttp_cors
 from aiohttp_session import get_session
@@ -32,7 +32,7 @@ async def debug_check_user(self, request):
         return web.json_response({"error": "Not found"}, status=404)
     username = request.match_info['username']
     
-    result = {
+    result: Dict[str, Any] = {
         'username': username,
         'redis_username_map': None,
         'redis_user_data': None,

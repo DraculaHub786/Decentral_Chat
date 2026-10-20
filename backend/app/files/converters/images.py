@@ -32,7 +32,9 @@ def convert_image_format(input_path, output_path, target_format):
         # Open and auto-orient image based on EXIF data
         img = Image.open(input_path)
         try:
-            img = ImageOps.exif_transpose(img)
+            transposed = ImageOps.exif_transpose(img)
+            if transposed is not None:
+                img = transposed
         except Exception:
             pass  # No EXIF data or already oriented
         
@@ -135,7 +137,8 @@ def convert_image_format(input_path, output_path, target_format):
             save_kwargs = {'format': target_format.upper()}
         
         # Save the image
-        img.save(output_path, **save_kwargs)
+        img_format = str(save_kwargs.pop('format', target_format.upper()))
+        img.save(output_path, format=img_format, **save_kwargs)
         logger.info(f"✅ Image conversion successful: {target_format.upper()}")
         return output_path
         

@@ -10,27 +10,49 @@ import redis.asyncio as redis
 from cryptography.fernet import Fernet
 import logging
 from pathlib import Path
+import sys
+
+_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
 from PIL import Image, ImageOps
 import PyPDF2
 from docx import Document
 from pptx import Presentation
 import openpyxl
-from app.globals import g
-from app.core.config import (REDIS_URL, SECRET_KEY, FIREBASE_CRED, PORT,
-    MAX_FILE_SIZE, UPLOAD_DIR, ALLOWED_EXTENSIONS, ENCRYPTION_KEY,
-    HAS_LIBREOFFICE, HAS_UNOCONV, FFMPEG_PATH, HAS_PDF2DOCX, PDFConverter,
-    HAS_BS4, HAS_MARKDOWN, print_conversion_capabilities)
-from app.core.security import (_ensure_secret_key, _ensure_fernet_key,
-    _validate_password, _validate_file_magic, _resolve_safe_path, _log_safe, _is_admin)
-from app.core.rate_limiter import RateLimiter
-from app.core.redis_client import MockRedis, MockPipeline
-from app.core.firebase_client import init_firebase
+
+try:
+    from app.globals import g
+    from app.core.config import (REDIS_URL, SECRET_KEY, FIREBASE_CRED, PORT,
+        MAX_FILE_SIZE, UPLOAD_DIR, ALLOWED_EXTENSIONS, ENCRYPTION_KEY,
+        HAS_LIBREOFFICE, HAS_UNOCONV, FFMPEG_PATH, HAS_PDF2DOCX, PDFConverter,
+        HAS_BS4, HAS_MARKDOWN, print_conversion_capabilities)
+    from app.core.security import (_ensure_secret_key, _ensure_fernet_key,
+        _validate_password, _validate_file_magic, _resolve_safe_path, _log_safe, _is_admin, get_client_ip)
+    from app.core.rate_limiter import RateLimiter
+    from app.core.redis_client import MockRedis, MockPipeline
+    from app.core.firebase_client import init_firebase
+    from app.auth.tokens import generate_token, _generate_refresh_token, get_user_from_token
+except ImportError:
+    from ..globals import g
+    from ..core.config import (REDIS_URL, SECRET_KEY, FIREBASE_CRED, PORT,
+        MAX_FILE_SIZE, UPLOAD_DIR, ALLOWED_EXTENSIONS, ENCRYPTION_KEY,
+        HAS_LIBREOFFICE, HAS_UNOCONV, FFMPEG_PATH, HAS_PDF2DOCX, PDFConverter,
+        HAS_BS4, HAS_MARKDOWN, print_conversion_capabilities)
+    from ..core.security import (_ensure_secret_key, _ensure_fernet_key,
+        _validate_password, _validate_file_magic, _resolve_safe_path, _log_safe, _is_admin, get_client_ip)
+    from ..core.rate_limiter import RateLimiter
+    from ..core.redis_client import MockRedis, MockPipeline
+    from ..core.firebase_client import init_firebase
+    from .tokens import generate_token, _generate_refresh_token, get_user_from_token
+
 logger = logging.getLogger(__name__)
 async def handle_register(self, request):
     """Register new user with bcrypt password hashing"""
     try:
         # Rate limiting
-        ip = request.remote or request.headers.get('X-Forwarded-For', 'unknown')
+        ip = get_client_ip(request)
         if self.rate_limiter.is_rate_limited(f"register:{ip}"):
             logger.warning(f"⚠️ Rate limited registration attempt from {ip}")
             return web.json_response({"error": "Too many attempts. Please try again later."}, status=429)
@@ -216,7 +238,7 @@ async def handle_login(self, request):
     """Login user with bcrypt password verification"""
     try:
         # Rate limiting
-        ip = request.remote or request.headers.get('X-Forwarded-For', 'unknown')
+        ip = get_client_ip(request)
         if self.rate_limiter.is_rate_limited(f"login:{ip}"):
             logger.warning(f"⚠️ Rate limited login attempt from {ip}")
             return web.json_response({"error": "Too many attempts. Please try again later."}, status=429)
@@ -442,19 +464,22 @@ async def refresh_token(self, request):
             return web.json_response({"error": "Invalid refresh token payload"}, status=401)
 
         # Check if refresh token was revoked (exists in Redis)
-        stored = await g.redis_client.hgetall(f"refresh_token:{token_id}")
+        stored = await g.redis_client.hgetall(f"refresh_token:{token_id}") if g.redis_client else {}
         if stored and stored.get('revoked') == 'true':
             logger.warning(f"⚠️ Attempted use of revoked refresh token {token_id} for user {user_id}")
             return web.json_response({"error": "Refresh token revoked. Please log in again."}, status=401)
 
         # Optionally rotate: revoke old, issue new
-        if stored:
-            await g.redis_client.hset(f"refresh_token:{token_id}", "revoked", "true")
+        if stored and g.redis_client:
+            try:
+                await g.redis_client.hset(f"refresh_token:{token_id}", "revoked", "true")
+            except Exception:
+                pass
 
         # Generate new access + refresh tokens
         device_fp = request.headers.get('User-Agent', '')[:128]
-        new_access = self.generate_token(user_id)
-        new_refresh = await self._generate_refresh_token(user_id, device_fp)
+        new_access = self.generate_token(user_id) if hasattr(self, 'generate_token') else generate_token(user_id)
+        new_refresh = await self._generate_refresh_token(user_id, device_fp) if hasattr(self, '_generate_refresh_token') else await _generate_refresh_token(user_id, device_fp)
 
         return web.json_response({
             "success": True,
