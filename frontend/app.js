@@ -11064,14 +11064,25 @@
             });
         }
 
-        // Update selectChat to close sidebar on mobile
+        // Update selectChat for smooth mobile & adaptive desktop views
         const originalSelectChat = typeof window.selectChat !== 'undefined' ? window.selectChat : function () { };
         selectChat = async function (chat) {
             await originalSelectChat(chat);
 
-            // Force WhatsApp layout: sidebar always closes on mobile
-            if (window.innerWidth <= 900) {
+            document.body.classList.add('in-active-chat');
+            const sidebar = document.getElementById('sidebar');
+            const activeChatEl = document.getElementById('activeChat');
+            const emptyState = document.getElementById('emptyState');
+
+            if (window.innerWidth <= 768) {
                 closeSidebarMobile();
+                if (sidebar) sidebar.style.display = 'none';
+                if (emptyState) emptyState.style.display = 'none';
+                if (activeChatEl) activeChatEl.style.display = 'flex';
+            } else {
+                if (sidebar) sidebar.style.display = 'flex';
+                if (activeChatEl) activeChatEl.style.display = 'flex';
+                if (emptyState) emptyState.style.display = 'none';
             }
         };
 
@@ -11410,7 +11421,13 @@
 
             if (section === 'chats') {
                 const sidebar = document.getElementById('sidebar');
-                if (sidebar) sidebar.classList.remove('collapsed');
+                if (sidebar) {
+                    sidebar.classList.remove('collapsed');
+                    sidebar.style.display = 'flex';
+                }
+                if (window.innerWidth <= 768 && typeof backToChatList === 'function') {
+                    backToChatList();
+                }
             } else if (section === 'contacts') {
                 if (typeof openContactsManager === 'function') openContactsManager();
             } else if (section === 'calls') {
@@ -11441,5 +11458,103 @@
 
         // Auto-run theme initialization
         initTheme();
-        
 
+        // ===== MOBILE VIEW TRANSITIONS & BACK NAVIGATION =====
+        function backToChatList() {
+            document.body.classList.remove('in-active-chat');
+            const sidebar = document.getElementById('sidebar');
+            const activeChatEl = document.getElementById('activeChat');
+            const emptyStateEl = document.getElementById('emptyState');
+
+            if (sidebar) {
+                sidebar.style.display = 'flex';
+                sidebar.classList.remove('collapsed');
+            }
+            if (window.innerWidth <= 768) {
+                if (activeChatEl) activeChatEl.style.display = 'none';
+                if (emptyStateEl) emptyStateEl.style.display = 'none';
+            }
+        }
+        window.backToChatList = backToChatList;
+
+        // ===== FULLSCREEN TOGGLE CONTROLLER =====
+        function toggleFullScreen() {
+            try {
+                if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+                    const docEl = document.documentElement;
+                    if (docEl.requestFullscreen) {
+                        docEl.requestFullscreen();
+                    } else if (docEl.webkitRequestFullscreen) {
+                        docEl.webkitRequestFullscreen();
+                    } else if (docEl.msRequestFullscreen) {
+                        docEl.msRequestFullscreen();
+                    }
+                } else {
+                    if (document.exitFullscreen) {
+                        document.exitFullscreen();
+                    } else if (document.webkitExitFullscreen) {
+                        document.webkitExitFullscreen();
+                    } else if (document.msExitFullscreen) {
+                        document.msExitFullscreen();
+                    }
+                }
+            } catch (e) {
+                console.warn('Fullscreen toggle failed:', e);
+            }
+        }
+
+        function updateFullscreenUI() {
+            const isFull = !!(document.fullscreenElement || document.webkitFullscreenElement);
+            const icon = document.getElementById('fullscreenIcon');
+            const btn = document.getElementById('fullscreenToggleBtn');
+            if (icon) {
+                icon.textContent = isFull ? '⤢' : '⛶';
+            }
+            if (btn) {
+                btn.title = isFull ? 'Exit Fullscreen' : 'Toggle Fullscreen';
+                btn.classList.toggle('active', isFull);
+            }
+        }
+
+        document.addEventListener('fullscreenchange', updateFullscreenUI);
+        document.addEventListener('webkitfullscreenchange', updateFullscreenUI);
+        window.toggleFullScreen = toggleFullScreen;
+
+        // ===== ADAPTIVE SCREEN RESIZE & ORIENTATION CONTROLLER =====
+        function syncResponsiveLayout() {
+            const isMobile = window.innerWidth <= 768;
+            const sidebar = document.getElementById('sidebar');
+            const activeChatEl = document.getElementById('activeChat');
+            const emptyState = document.getElementById('emptyState');
+
+            if (!isMobile) {
+                document.body.classList.remove('in-active-chat');
+                if (sidebar) {
+                    sidebar.style.display = 'flex';
+                }
+                if (window.activeChat) {
+                    if (activeChatEl) activeChatEl.style.display = 'flex';
+                    if (emptyState) emptyState.style.display = 'none';
+                } else {
+                    if (activeChatEl) activeChatEl.style.display = 'none';
+                    if (emptyState) emptyState.style.display = 'flex';
+                }
+                const backdrop = document.getElementById('sidebarBackdrop');
+                if (backdrop) backdrop.remove();
+            } else {
+                if (window.activeChat && document.body.classList.contains('in-active-chat')) {
+                    if (sidebar) sidebar.style.display = 'none';
+                    if (activeChatEl) activeChatEl.style.display = 'flex';
+                    if (emptyState) emptyState.style.display = 'none';
+                } else {
+                    if (sidebar) sidebar.style.display = 'flex';
+                    if (activeChatEl) activeChatEl.style.display = 'none';
+                    if (emptyState) emptyState.style.display = 'none';
+                }
+            }
+        }
+
+        window.addEventListener('resize', syncResponsiveLayout);
+        window.addEventListener('orientationchange', () => {
+            setTimeout(syncResponsiveLayout, 150);
+        });
