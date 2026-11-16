@@ -49,6 +49,12 @@ async def get_messages(self, request):
             for m in deleted_for_me
         )
 
+        # Members this viewer has hidden inside *this* chat (C3). Filtering on
+        # read keeps the message in storage for everyone else, so removing a
+        # block restores the history instead of losing it permanently.
+        from app.chats.chat_blocks import blocked_sender_set
+        blocked_senders = await blocked_sender_set(chat_id, user_id)
+
         message_ids = await g.redis_client.lrange(
             f"chat_messages:{chat_id}",
             offset,
@@ -127,6 +133,10 @@ async def get_messages(self, request):
                 continue
 
             sender_id = msg_data.get('sender_id')
+
+            # Hidden for this viewer only: the sender was blocked in this chat.
+            if sender_id in blocked_senders:
+                continue
 
             # Delete-for-everyone handling
             if msg_data.get('deleted') == 'True':
@@ -626,4 +636,3 @@ async def forward_message(self, request):
     except Exception as e:
         logger.error(f"❌ Forward error: {e}", exc_info=True)
         return web.json_response({"error": str(e)}, status=500)
-

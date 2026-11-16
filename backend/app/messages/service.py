@@ -27,6 +27,7 @@ from app.core.redis_client import MockRedis, MockPipeline
 from app.core.firebase_client import init_firebase
 logger = logging.getLogger(__name__)
 from app.ws.connection_manager import broadcast_to_users, broadcast_user_status, broadcast_typing
+from app.chats.membership import bind_file_to_chat
 async def create_message(self, chat_id: str, sender_id: str, content: str,
                     message_type: str = 'text', encrypted: bool = True,
                     attachments: Optional[List[str]] = None, reply_to: Optional[str] = None) -> str:
@@ -68,6 +69,13 @@ async def create_message(self, chat_id: str, sender_id: str, content: str,
 
 
     await g.redis_client.hset(f"message:{message_id}", mapping=message_data)
+
+    # Record which chat each attachment belongs to. Without this a recipient
+    # has no provable entitlement to the file days later (D-06).
+    for attachment_id in attachments:
+        if attachment_id:
+            await bind_file_to_chat(attachment_id, chat_id)
+
     if self.db:
         try:
             # Prepare message document
@@ -244,4 +252,3 @@ async def broadcast_message(self, chat_id: str, message_id: str, sender_id: str)
 
     except Exception as e:
         logger.error(f"❌ Broadcast message error: {e}", exc_info=True)
-

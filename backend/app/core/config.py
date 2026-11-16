@@ -31,11 +31,13 @@ UPLOAD_DIR = BASE_DIR / 'uploads'
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {
-    'image': ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'],
-    'video': ['.mp4', '.webm', '.mov', '.avi', '.mkv'],
-    'audio': ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac'],
+    'image': ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg',
+              '.tiff', '.tif', '.ico', '.avif', '.heic', '.heif'],
+    'video': ['.mp4', '.webm', '.mov', '.avi', '.mkv', '.flv', '.wmv'],
+    'audio': ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.opus', '.wma'],
     'document': ['.pdf', '.doc', '.docx', '.txt', '.rtf', '.odt',
-                 '.ppt', '.pptx', '.xls', '.xlsx', '.csv', '.md'],
+                 '.ppt', '.pptx', '.xls', '.xlsx', '.csv', '.md',
+                 '.html', '.htm'],
 }
 
 # ---- crypto ----

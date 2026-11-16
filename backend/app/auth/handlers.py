@@ -413,6 +413,20 @@ async def handle_login(self, request):
         logger.error(f"❌ Login error: {e}", exc_info=True)
         return web.json_response({"error": str(e)}, status=500)
 
+# How long a rotated refresh token may still be redeemed. Covers the case where
+# the client never received its replacement, without leaving a stolen token
+# useful for long.
+REFRESH_ROTATION_GRACE_SECONDS = 120
+
+
+def _to_epoch(value) -> float:
+    """Parse a stored rotation timestamp; 0.0 when absent or malformed."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 async def handle_logout(self, request):
     """Logout user"""
     try:
@@ -463,16 +477,36 @@ async def refresh_token(self, request):
         if not token_id or not user_id:
             return web.json_response({"error": "Invalid refresh token payload"}, status=401)
 
-        # Check if refresh token was revoked (exists in Redis)
+        # Rotation grace window.
+        #
+        # The old token is rotated the moment it is used. But the client only
+        # gets the replacement if the response actually arrives. A dropped
+        # connection, a closed tab, or two tabs refreshing at once would leave
+        # the client holding a token we just killed — which turns any network
+        # hiccup into a forced re-login and eventually destroys a 90-day
+        # session. So reuse is allowed for a short window after rotation and
+        # refused afterwards.
         stored = await g.redis_client.hgetall(f"refresh_token:{token_id}") if g.redis_client else {}
         if stored and stored.get('revoked') == 'true':
-            logger.warning(f"⚠️ Attempted use of revoked refresh token {token_id} for user {user_id}")
-            return web.json_response({"error": "Refresh token revoked. Please log in again."}, status=401)
+            rotated_at = _to_epoch(stored.get('rotated_at'))
+            age = datetime.datetime.now(datetime.UTC).timestamp() - rotated_at
+            if rotated_at and age <= REFRESH_ROTATION_GRACE_SECONDS:
+                logger.info(f"↩️ Refresh token {token_id} reused inside grace window ({age:.0f}s)")
+            else:
+                logger.warning(f"⚠️ Reuse of rotated refresh token {token_id} for user {user_id}")
+                return web.json_response(
+                    {"error": "Refresh token revoked. Please log in again."}, status=401
+                )
 
-        # Optionally rotate: revoke old, issue new
         if stored and g.redis_client:
             try:
-                await g.redis_client.hset(f"refresh_token:{token_id}", "revoked", "true")
+                await g.redis_client.hset(
+                    f"refresh_token:{token_id}",
+                    mapping={
+                        "revoked": "true",
+                        "rotated_at": str(datetime.datetime.now(datetime.UTC).timestamp()),
+                    },
+                )
             except Exception:
                 pass
 
@@ -490,4 +524,3 @@ async def refresh_token(self, request):
     except Exception as e:
         logger.error(f"❌ Refresh token error: {e}", exc_info=True)
         return web.json_response({"error": str(e)}, status=500)
-

@@ -2275,6 +2275,35 @@ button {
     box-shadow: none;
 }
 
+/* Batch convert: same shape as the single-file button, but framed as a
+   secondary action so the two are never confused at a glance. */
+.convert-all-btn {
+    background: transparent;
+    color: var(--accent-amber);
+    border: 1px solid var(--accent-amber-border);
+    box-shadow: none;
+    padding: 8px 20px;
+    font-size: 13px;
+    font-weight: 700;
+    border-radius: 999px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    white-space: nowrap;
+}
+
+.convert-all-btn:hover:not(:disabled) {
+    background: var(--accent-amber-border);
+    transform: translateY(-2px);
+}
+
+.convert-all-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+}
 .conversion-progress {
     width: 100%;
     display: flex;

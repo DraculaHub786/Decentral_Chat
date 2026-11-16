@@ -59,7 +59,20 @@ def perform_file_conversion(input_path, output_path, source_ext, target_ext):
         raise Exception(f"Conversion {source_ext} → {target_ext} not supported")
 
 def get_supported_conversions(file_extension):
-    """Return supported conversion formats for given file type - SUPER CONVERTER"""
+    """Return supported targets for an extension, straight from the registry.
+
+    The hand-maintained map that used to live here is what produced D-01 (it
+    advertised fewer targets than the UI offered, so real requests returned
+    HTTP 500) and D-02 (it advertised zip/tar/gz/7z conversions that were never
+    implemented). The registry is the single source of truth and only lists
+    routes whose engine is actually installed.
+    """
+    from app.files.converters import routes_table
+    return routes_table.supported_targets(str(file_extension).lower().lstrip('.'))
+
+
+def get_supported_conversions_legacy_unused(file_extension):
+    """Old hardcoded map, retained only to document what was wrong."""
     conversion_map = {
         # Image formats - comprehensive conversions
         'jpg': ['png', 'webp', 'pdf', 'bmp', 'tiff', 'ico', 'gif', 'jpeg'],
@@ -155,6 +168,14 @@ async def convert_uploaded_file(request):
                 logger.warning(f"Firestore file fallback failed for {file_id}: {fb_err}")
         
         if not file_meta:
+            return web.json_response({"error": "File not found"}, status=404)
+
+        # D-05: any authenticated user could previously convert any file_id and
+        # receive a readable copy. The owner check must happen before the bytes
+        # are touched.
+        owner_id = file_meta.get('user_id', '')
+        if owner_id and owner_id != user_id:
+            logger.warning(f"User {user_id} tried to convert file {file_id} owned by {owner_id}")
             return web.json_response({"error": "File not found"}, status=404)
 
         try:
@@ -402,4 +423,3 @@ async def get_conversion_formats(request):
     except Exception as e:
         logger.error(f"Error getting conversion formats: {e}")
         return web.json_response({"error": str(e)}, status=500)
-

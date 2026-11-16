@@ -832,10 +832,14 @@
                         'jwk', otherPubJwk,
                         { name: 'ECDH', namedCurve: 'P-256' }, false, []);
 
+                    // `true` = extractable. persistChatKey() below calls
+                    // exportKey('jwk', key) so the chat survives a reload; with
+                    // `false` that export throws InvalidAccessError and every
+                    // chat silently fell back to plaintext after a refresh.
                     const sharedKey = await crypto.subtle.deriveKey(
                         { name: 'ECDH', public: otherPubKey },
                         this.keyPair.privateKey,
-                        { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+                        { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
 
                     this.chatKeys.set(chatId, sharedKey);
                     await this.persistChatKey(chatId, sharedKey);
@@ -861,7 +865,7 @@
                     const groupKey = await crypto.subtle.deriveKey(
                         { name: 'PBKDF2', salt: enc.encode('decentral_chat_v1'), iterations: 100000, hash: 'SHA-256' },
                         baseKey,
-                        { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+                        { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
                     this.chatKeys.set(chatId, groupKey);
                     await this.persistChatKey(chatId, groupKey);
                     console.log(`🔒 Group E2E key derived for ${chatId}`);
@@ -2465,6 +2469,50 @@
             }
         }, true);
 
+        // Signed media URLs, keyed by upload path. <img>/<video>/<audio> cannot
+        // send an Authorization header, so the server issues short-lived
+        // per-user URLs instead of the client putting a session token in the URL.
+        const MEDIA_URL_CACHE = new Map();
+
+        function mediaUrlFor(rawUrl) {
+            if (!rawUrl) return rawUrl;
+            return MEDIA_URL_CACHE.get(rawUrl) || rawUrl;
+        }
+
+        // One round trip per batch of unseen attachment paths. window.fetch is
+        // already patched to attach the bearer token, so this stays authenticated.
+        async function hydrateMediaUrls(messages) {
+            const wanted = new Set();
+            (messages || []).forEach(m => {
+                const list = (m && m.attachments) ? m.attachments : [];
+                list.forEach(att => {
+                    if (!att) return;
+                    [att.url, att.thumbnail_url].forEach(u => {
+                        if (typeof u === 'string' && u.indexOf('/api/uploads/') === 0 && !MEDIA_URL_CACHE.has(u)) {
+                            wanted.add(u);
+                        }
+                    });
+                });
+            });
+            if (wanted.size === 0) return false;
+            try {
+                const res = await fetch(API_URL + '/files/media-urls', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ paths: Array.from(wanted) })
+                });
+                if (!res.ok) return false;
+                const data = await res.json();
+                const urls = data.urls || {};
+                const keys = Object.keys(urls);
+                keys.forEach(key => MEDIA_URL_CACHE.set(key, urls[key]));
+                return keys.length > 0;
+            } catch (err) {
+                console.warn('Media URL hydration failed:', err);
+                return false;
+            }
+        }
+
         function renderMessages(messages) {
             const container = document.getElementById('messagesContainer');
             container.innerHTML = '';
@@ -2486,6 +2534,12 @@
                 if (seen.has(m.id)) return false;
                 seen.add(m.id);
                 return true;
+            });
+
+            // Attachments get short-lived signed URLs; re-render once they arrive.
+            // Second pass finds nothing new (everything is cached) so it stops.
+            hydrateMediaUrls(uniqueMessages).then(added => {
+                if (added) renderMessages(uniqueMessages);
             });
 
             uniqueMessages.forEach(message => {
@@ -2568,9 +2622,11 @@
 
                     if (att.type === 'image') {
                         // ✅ Fix URL construction - prepend server URL if not absolute
-                        const imageUrl = att.url.startsWith('http') ? att.url : `${window.location.origin}${att.url}`;
-                        const thumbUrl = att.thumbnail_url
-                            ? (att.thumbnail_url.startsWith('http') ? att.thumbnail_url : `${window.location.origin}${att.thumbnail_url}`)
+                        const rawImageUrl = mediaUrlFor(att.url);
+                        const imageUrl = rawImageUrl.startsWith('http') ? rawImageUrl : `${window.location.origin}${rawImageUrl}`;
+                        const rawThumbUrl = att.thumbnail_url ? mediaUrlFor(att.thumbnail_url) : null;
+                        const thumbUrl = rawThumbUrl
+                            ? (rawThumbUrl.startsWith('http') ? rawThumbUrl : `${window.location.origin}${rawThumbUrl}`)
                             : imageUrl;
 
                         attachmentsHtml += `
@@ -2591,7 +2647,8 @@
                             </div>
                         `;
                     } else if (att.type === 'video') {
-                        const videoUrl = att.url.startsWith('http') ? att.url : `${window.location.origin}${att.url}`;
+                        const rawVideoUrl = mediaUrlFor(att.url);
+                        const videoUrl = rawVideoUrl.startsWith('http') ? rawVideoUrl : `${window.location.origin}${rawVideoUrl}`;
                         attachmentsHtml += `
                             <div class="message-attachment">
                                 <video 
@@ -2605,7 +2662,8 @@
                     } else if (message.message_type === 'voice' || att.type === 'audio') {
                         const duration = att.duration || '0:00';
                         const audioId = `audio_${message.id}_${att.id}`;
-                        const audioUrl = att.url.startsWith('http') ? att.url : `${window.location.origin}${att.url}`;
+                        const rawAudioUrl = mediaUrlFor(att.url);
+                        const audioUrl = rawAudioUrl.startsWith('http') ? rawAudioUrl : `${window.location.origin}${rawAudioUrl}`;
 
                         attachmentsHtml += `
                             <div class="voice-message">
@@ -2630,7 +2688,8 @@
                         else if (att.filename?.endsWith('.xls') || att.filename?.endsWith('.xlsx')) icon = '📗';
                         else if (att.type === 'archive') icon = '📦';
 
-                        const fileUrl = att.url.startsWith('http') ? att.url : `${window.location.origin}${att.url}`;
+                        const rawFileUrl = mediaUrlFor(att.url);
+                        const fileUrl = rawFileUrl.startsWith('http') ? rawFileUrl : `${window.location.origin}${rawFileUrl}`;
                         const fileSize = formatFileSize(att.size || 0);
                         // Encrypted if flagged in message or tracked locally this session
                         const _isEnc = message.encrypted === true ||
@@ -2883,13 +2942,18 @@
             flv: ['mp4', 'mp3', 'avi', 'webm'],
             wmv: ['mp4', 'mp3', 'avi'],
             
-            // Archives
-            zip: ['tar', 'gz', '7z'],
-            tar: ['zip', 'gz'],
-            gz: ['zip', 'tar'],
-            '7z': ['zip', 'tar'],
-            rar: ['zip', 'tar']
+            // Archives. Only zip and tar exist (Phase 6); gz, 7z and rar were
+            // removed from the registry because nothing implemented them, so
+            // advertising them here would recreate the D-02 dead-option bug.
+            zip: ['tar'],
+            tar: ['zip']
         };
+
+        // Archives the backend can create from an arbitrary upload. Kept in
+        // sync with PACKABLE_EXTS in the registry's route table.
+        const ARCHIVE_TARGETS = ['zip', 'tar'];
+        const ARCHIVE_ONLY_SOURCES = ['zip', 'tar'];
+        const BATCH_MAX_FILES = 20;
 
         function getFileExtension(file) {
             if (!file) return '';
@@ -2921,7 +2985,7 @@
             const cleanExt = (fileExtension || '').toLowerCase().replace(/^\./, '');
             if (!cleanExt) return [];
             try {
-                const response = await fetch(`${API_URL}/files/conversion-formats?ext=${cleanExt}`);
+                const response = await fetch(`${API_URL}/files/formats?ext=${cleanExt}`);
                 if (response.ok) {
                     const data = await response.json();
                     if (data && Array.isArray(data.formats) && data.formats.length > 0) {
@@ -2943,7 +3007,49 @@
             const hasSelection = select.value && select.value !== '';
             convertBtn.disabled = !hasSelection;
 
+
+            // The batch button needs the same target plus 2+ files.
+            const convertAllBtn = document.getElementById('convertAllBtn');
+            if (convertAllBtn) {
+                convertAllBtn.disabled = !hasSelection || selectedFiles.length < 2;
+            }
+
             console.log('🔄 Format selected:', select.value, '| Button enabled:', hasSelection);
+        }
+
+        // Registry capability table: route -> tier/engines. Lets the UI tell the
+        // user, before converting, whether the result is lossless, high
+        // fidelity, or a rebuilt layout.
+        let CONVERTER_CAPABILITIES = null;
+
+        async function loadConverterCapabilities(force) {
+            if (CONVERTER_CAPABILITIES && !force) return CONVERTER_CAPABILITIES;
+            try {
+                const response = await fetch(API_URL + '/files/capabilities');
+                if (!response.ok) return null;
+                const data = await response.json();
+                const table = {};
+                for (const route of (data.routes || [])) {
+                    if (!route.available) continue;
+                    table[route.src + '->' + route.dst] = route;
+                }
+                CONVERTER_CAPABILITIES = table;
+                console.log('Converter capabilities loaded: ' + Object.keys(table).length + ' routes');
+                return table;
+            } catch (error) {
+                console.warn('Capabilities load failed:', error);
+                return null;
+            }
+        }
+
+        const TIER_BADGES = { A: 'Lossless', B: 'High fidelity', C: 'Rebuilt layout' };
+
+        async function routeTier(sourceExt, targetExt) {
+            const table = await loadConverterCapabilities();
+            if (!table) return '';
+            const src = (sourceExt || '').toLowerCase().replace(/^\./, '');
+            const route = table[src + '->' + (targetExt || '').toLowerCase()];
+            return route ? route.tier : '';
         }
 
         async function convertSelectedFile() {
@@ -2991,81 +3097,97 @@
                     if (progressFill) progressFill.style.backgroundColor = '';
                 }
 
-                // Progress animation
-                let progress = 0;
-                progressInterval = setInterval(() => {
-                    progress += 10;
-                    if (progress <= 90) {
-                        if (progressFill) progressFill.style.width = `${progress}%`;
-                        if (progressText) progressText.textContent = `Converting... ${progress}%`;
-                    }
-                }, 200);
+                // No fake progress timer: the job reports a real stage, and
+                // `percent` only when the engine can actually measure it.
+                if (progressFill) progressFill.style.width = '0%';
+                if (progressText) progressText.textContent = 'Starting...';
 
-                let fileId = file.serverId;
+                // v2 job API: registry-driven engines, real stage reporting and
+                // an honest fidelity tier. Create the job, then poll for state.
+                const jobForm = new FormData();
+                jobForm.append('file', file, file.name);
+                jobForm.append('target', targetFormat);
+                const authOnly = authToken ? { Authorization: `Bearer ${authToken}` } : {};
 
-                // 1️⃣ Upload original file if not already on server
-                if (!fileId) {
-                    const formData = new FormData();
-                    formData.append('file', file);
+                const convertResponse = await fetch(`${API_URL}/files/jobs`, {
+                    method: 'POST',
+                    headers: authOnly,
+                    body: jobForm
+                });
 
-                    const uploadHeaders = {};
-                    if (authToken) uploadHeaders['Authorization'] = `Bearer ${authToken}`;
-
-                    const uploadResponse = await fetch(`${API_URL}/upload/file`, {
-                        method: 'POST',
-                        headers: uploadHeaders,
-                        body: formData
-                    });
-
-                    if (!uploadResponse.ok) {
-                        const errTxt = await uploadResponse.text();
-                        throw new Error(`Upload failed: ${errTxt}`);
-                    }
-
-                    const uploadData = await uploadResponse.json();
-                    fileId = uploadData.file.id;
+                if (!convertResponse.ok) {
+                    let friendly = 'Conversion failed';
+                    try {
+                        const err = await convertResponse.json();
+                        friendly = err.error || friendly;
+                    } catch (_) { /* keep the default message */ }
+                    clearInterval(progressInterval);
+                    throw new Error(friendly);
                 }
 
-                // 2️⃣ Convert file
-                const convertHeaders = { 'Content-Type': 'application/json' };
-                if (authToken) convertHeaders['Authorization'] = `Bearer ${authToken}`;
+                let job = await convertResponse.json();
+                const jobId = job.job_id;
+                const stageLabels = {
+                    probing: 'Inspecting file',
+                    converting: 'Converting',
+                    verifying: 'Verifying result'
+                };
+                const pollDeadline = Date.now() + 5 * 60 * 1000;
 
-                const convertResponse = await fetch(`${API_URL}/files/convert`, {
-                    method: 'POST',
-                    headers: convertHeaders,
-                    body: JSON.stringify({
-                        file_id: fileId,
-                        target_format: targetFormat
-                    })
-                });
+                while (job.state === 'queued' || job.state === 'running') {
+                    if (Date.now() > pollDeadline) {
+                        clearInterval(progressInterval);
+                        throw new Error('Conversion timed out');
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 350));
+                    const statusResp = await fetch(`${API_URL}/files/jobs/${jobId}`, { headers: authOnly });
+                    if (!statusResp.ok) {
+                        clearInterval(progressInterval);
+                        throw new Error('Lost track of the conversion job');
+                    }
+                    job = await statusResp.json();
+                    if (progressText) {
+                        progressText.textContent = `${stageLabels[job.stage] || 'Working'}...`;
+                    }
+                    if (typeof job.percent === 'number' && progressFill) {
+                        progressFill.style.width = `${job.percent}%`;
+                    }
+                }
 
                 clearInterval(progressInterval);
 
-                if (!convertResponse.ok) {
-                    const err = await convertResponse.json();
-                    throw new Error(err.error || 'Conversion failed');
+                if (job.state !== 'done') {
+                    throw new Error(job.error || 'Conversion failed');
                 }
 
-                const convertData = await convertResponse.json();
-
-                // 3️⃣ Use server-converted file directly
-                let downloadUrl = convertData.converted_file.url;
-                if (!downloadUrl.startsWith('http')) {
-                    downloadUrl = downloadUrl.startsWith('/api')
-                        ? downloadUrl
-                        : `/api${downloadUrl}`;
+                // Report exactly what the user got.
+                const TIER_LABELS = { A: 'Lossless', B: 'High fidelity', C: 'Rebuilt layout' };
+                const tierLabel = TIER_LABELS[job.tier] || '';
+                for (const warning of (job.warnings || [])) {
+                    console.warn('Conversion warning:', warning);
+                    if (typeof showToast === 'function') showToast(warning, 'info');
                 }
 
-                // Store a reference object that points to server-converted file
-                const convertedRef = {
-                    __converted: true,
-                    serverId: convertData.converted_file.id,
-                    name: convertData.converted_file.filename,
-                    url: downloadUrl,
-                    mime: convertData.converted_file.type || '',
-                    fileType: convertData.converted_file.type || 'file',
-                    size: convertData.converted_file.size || 0
-                };
+                // Single-use token; the server deletes the plaintext right after.
+                const resultUrl = `${API_URL}/files/jobs/${jobId}/result?token=${encodeURIComponent(job.result_token)}`;
+                const resultResp = await fetch(resultUrl, { headers: authOnly });
+                if (!resultResp.ok) {
+                    throw new Error('Could not download the converted file');
+                }
+                const resultBlob = await resultResp.blob();
+
+                // Keep the result as a normal File so the standard send path
+                // encrypts it with the chat key before upload (fixes D-07:
+                // converted files used to bypass E2EE entirely).
+                const convertedName = job.result_name
+                    || `${file.name.replace(/\.[^.]+$/, '')}.${targetFormat}`;
+                const convertedFile = new File([resultBlob], convertedName, {
+                    type: resultBlob.type || 'application/octet-stream'
+                });
+                convertedFile.__tier = job.tier || '';
+                convertedFile.__tierLabel = tierLabel;
+                convertedFile.__warnings = job.warnings || [];
+                const convertedRef = convertedFile;
 
                 // 4️⃣ Atomically replace original file in selectedFiles
                 const origName = file.name;
@@ -3151,6 +3273,125 @@
             }
         }
 
+        // Convert every selected file to one target and collect the
+        // results as a single ZIP. The server validates every route before
+        // queueing, so a mixed batch fails cleanly, never half-converted.
+        async function convertAllSelectedFiles() {
+            const targetFormat = (document.getElementById('targetFormatSelect') || {}).value;
+            const files = selectedFiles.slice();
+
+            if (!targetFormat) { showToast('Please select a target format', 'error'); return; }
+            if (files.length < 2) {
+                showToast('Select at least two files to convert as a batch', 'error');
+                return;
+            }
+            if (files.length > BATCH_MAX_FILES) {
+                showToast(`Convert at most ${BATCH_MAX_FILES} files at once`, 'error');
+                return;
+            }
+
+            const allBtn = document.getElementById('convertAllBtn');
+            const allText = document.getElementById('convertAllBtnText');
+            const allSpinner = document.getElementById('convertAllBtnSpinner');
+            const singleBtn = document.getElementById('convertFileBtn');
+            const sendBtn = document.getElementById('sendBtn');
+            const box = document.getElementById('conversionProgress');
+            const fill = document.getElementById('progressFill');
+            const label = document.getElementById('progressText');
+            const authOnly = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+
+            if (allBtn) allBtn.disabled = true;
+            if (singleBtn) singleBtn.disabled = true;
+            if (sendBtn) sendBtn.disabled = true;
+            if (allText) allText.style.display = 'none';
+            if (allSpinner) allSpinner.style.display = 'inline-block';
+            if (box) box.style.display = 'flex';
+            if (fill) { fill.style.width = '0%'; fill.style.backgroundColor = ''; }
+            if (label) label.textContent = `Uploading ${files.length} files...`;
+
+            try {
+                const form = new FormData();
+                form.append('target', targetFormat);
+                for (const file of files) form.append('file', file, file.name);
+
+                const resp = await fetch(`${API_URL}/files/batch`, {
+                    method: 'POST', headers: authOnly, body: form
+                });
+                if (!resp.ok) {
+                    let friendly = 'Batch conversion failed';
+                    try { friendly = (await resp.json()).error || friendly; } catch (_) {}
+                    throw new Error(friendly);
+                }
+
+                let batch = await resp.json();
+                const batchId = batch.batch_id;
+                const deadline = Date.now() + 10 * 60 * 1000;
+
+                while (batch.state === 'queued' || batch.state === 'running') {
+                    if (Date.now() > deadline) throw new Error('Batch conversion timed out');
+                    await new Promise(r => setTimeout(r, 400));
+                    const statusResp = await fetch(
+                        `${API_URL}/files/batch/${batchId}`, { headers: authOnly });
+                    if (!statusResp.ok) throw new Error('Lost track of the batch');
+                    batch = await statusResp.json();
+                    const finished = (batch.done || 0) + (batch.failed || 0);
+                    if (label) label.textContent = `Converting ${finished} of ${batch.total}...`;
+                    if (fill && batch.total) {
+                        fill.style.width = `${Math.round((finished / batch.total) * 100)}%`;
+                    }
+                }
+
+                if (batch.state !== 'done' || !batch.result_token) {
+                    throw new Error('The batch did not produce any results');
+                }
+                if (batch.failed) {
+                    showToast(`${batch.failed} of ${batch.total} files failed`, 'info');
+                }
+
+                const zipResp = await fetch(
+                    `${API_URL}/files/batch/${batchId}/result?token=${encodeURIComponent(batch.result_token)}`,
+                    { headers: authOnly }
+                );
+                if (!zipResp.ok) throw new Error('Could not download the archive');
+                const zipBlob = await zipResp.blob();
+
+                // Keep it a normal File so the standard send path encrypts
+                // it with the chat key. Converted output must never skip E2EE.
+                const batchFile = new File([zipBlob], `converted-${targetFormat}.zip`, {
+                    type: 'application/zip'
+                });
+                batchFile.__tier = 'A';
+                batchFile.__tierLabel = 'Archive';
+                batchFile.__warnings = [];
+
+                selectedFiles = [batchFile];
+                window.currentFileForConversion = batchFile;
+
+                const previewItems = document.getElementById('filePreviewItems');
+                if (previewItems) {
+                    previewItems.innerHTML = '';
+                    for (const f of selectedFiles) await addFilePreview(f);
+                }
+
+                if (fill) fill.style.width = '100%';
+                if (label) label.textContent = 
+                    `Batch complete (${batch.done}/${batch.total} converted)`;
+                showToast(`Converted ${batch.done} file(s) into one ZIP`, 'success');
+                updateSendButtonVisibility();
+
+            } catch (error) {
+                console.error('Batch conversion error:', error);
+                if (fill) { fill.style.width = '100%'; fill.style.backgroundColor = '#e5484d'; }
+                if (label) label.textContent = `Failed: ${error.message}`;
+                showToast(`Batch failed: ${error.message}`, 'error');
+            } finally {
+                if (allText) allText.style.display = 'inline';
+                if (allSpinner) allSpinner.style.display = 'none';
+                if (singleBtn) singleBtn.disabled = false;
+                if (sendBtn) sendBtn.disabled = false;
+            }
+        }
+
         async function updateFilePreviewAfterConversion(oldFileId, newFile) {
             const oldItem = document.querySelector(`[data-file-id="${oldFileId}"]`);
             if (oldItem) oldItem.remove();
@@ -3231,6 +3472,15 @@
             } else {
                 panel.style.display = 'none';
                 console.log('ℹ️ No conversion formats available for', fileExtension);
+            }
+
+            // "Convert all" only makes sense with more than one file.
+            const batchBtn = document.getElementById('convertAllBtn');
+            if (batchBtn) {
+                const canBatch = selectedFiles.length > 1
+                    && selectedFiles.length <= BATCH_MAX_FILES;
+                batchBtn.style.display = canBatch ? 'flex' : 'none';
+                batchBtn.disabled = true;
             }
         }
 
@@ -3855,23 +4105,7 @@
 
             console.log('📎 Adding preview for:', file.name, file.type);
 
-            // If this is a converted reference with a direct URL, use it for preview
-            if (file.__converted && file.url) {
-                const ext = getFileExtension(file);
-                const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext);
-                if (isImage) {
-                    previewItem.innerHTML = `
-                        <img src="${file.url}" alt="${escapeHtml(file.name)}" 
-                            style="width: 100%; height: 100%; object-fit: cover;">
-                        <button class="file-preview-remove" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); removeFilePreview(this.dataset.filename)">✕</button>
-                        <div class="file-preview-convert-badge converted" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); showConversionPanel(window.selectedFiles?.find(f => f.name === this.dataset.filename) || file)" title="Converted file">
-                            ✅ CONVERTED
-                        </div>
-                    `;
-                } else {
-                    showFileIconPreview(previewItem, file);
-                }
-            } else if (file.type && file.type.startsWith('image/')) {
+            if (file.type && file.type.startsWith('image/')) {
                 try {
                     const dataUrl = await new Promise((resolve, reject) => {
                         const reader = new FileReader();
@@ -3884,8 +4118,8 @@
                         <img src="${dataUrl}" alt="${escapeHtml(file.name)}" 
                             style="width: 100%; height: 100%; object-fit: cover;">
                         <button class="file-preview-remove" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); removeFilePreview(this.dataset.filename)">✕</button>
-                        <div class="file-preview-convert-badge ${file.__converted ? 'converted' : ''}" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); showConversionPanel(window.selectedFiles?.find(f => f.name === this.dataset.filename) || file)" title="Convert this image">
-                            ${file.__converted ? '✅ CONVERTED' : '🔄 CONVERT'}
+                        <div class="file-preview-convert-badge ${file.__tier ? 'converted' : ''}" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); showConversionPanel(window.selectedFiles?.find(f => f.name === this.dataset.filename) || file)" title="${file.__tierLabel || 'Convert this image'}">
+                            ${file.__tier ? '🔁 ' + escapeHtml(file.__tierLabel || 'CONVERTED') : '🔄 CONVERT'}
                         </div>
                     `;
                 } catch (error) {
@@ -3896,8 +4130,8 @@
                 previewItem.innerHTML = `
                     <div style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; font-size: 38px;">🎥</div>
                     <button class="file-preview-remove" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); removeFilePreview(this.dataset.filename)">✕</button>
-                    <div class="file-preview-convert-badge ${file.__converted ? 'converted' : ''}" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); showConversionPanel(window.selectedFiles?.find(f => f.name === this.dataset.filename) || file)" title="Convert this video">
-                        ${file.__converted ? '✅ CONVERTED' : '🔄 CONVERT'}
+                    <div class="file-preview-convert-badge ${file.__tier ? 'converted' : ''}" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); showConversionPanel(window.selectedFiles?.find(f => f.name === this.dataset.filename) || file)" title="${file.__tierLabel || 'Convert this video'}">
+                        ${file.__tier ? '🔁 ' + escapeHtml(file.__tierLabel || 'CONVERTED') : '🔄 CONVERT'}
                     </div>
                 `;
             } else {
@@ -3927,14 +4161,14 @@
 
             const displayName = file.name.length > 12 ? file.name.substring(0, 10) + '...' : file.name;
             const extLabel = (file.name.split('.').pop() || '').toUpperCase();
-            const isConverted = file.__converted === true;
+            const isConverted = Boolean(file.__tier);
 
             previewItem.innerHTML = `
                 <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; padding: 4px; box-sizing: border-box;">
                     <div style="font-size: 32px; line-height: 1; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.35));">${icon}</div>
                     <div style="font-size: 10px; color: var(--text-primary, #EDE9E2); margin-top: 3px; text-align: center; max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600;">${escapeHtml(displayName)}</div>
-                    <div class="file-preview-convert-badge ${isConverted ? 'converted' : ''}" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); showConversionPanel(window.selectedFiles?.find(f => f.name === this.dataset.filename) || file)" title="Convert this file">
-                        ${isConverted ? '✅ CONVERTED' : '🔄 CONVERT'}
+                    <div class="file-preview-convert-badge ${isConverted ? 'converted' : ''}" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); showConversionPanel(window.selectedFiles?.find(f => f.name === this.dataset.filename) || file)" title="${file.__tierLabel || 'Convert this file'}">
+                        ${isConverted ? '🔁 ' + escapeHtml(file.__tierLabel || 'CONVERTED') : '🔄 CONVERT'}
                     </div>
                 </div>
                 <button class="file-preview-remove" data-filename="${escapeHtml(file.name)}" onclick="event.stopPropagation(); removeFilePreview(this.dataset.filename)">✕</button>
@@ -3979,13 +4213,9 @@
             for (let i = 0; i < selectedFiles.length; i++) {
                 const file = selectedFiles[i];
 
-                // If this is a converted file reference (not a real File object), use the server ID directly
-                if (file.__converted && file.serverId) {
-                    console.log(`✅ Using converted file ID: ${file.serverId} (${file.name})`);
-                    uploadedFileIds.push(file.serverId);
-                    uploadedFileTypes.push(file.fileType || 'file');  // ✅ Track type
-                    continue;
-                }
+                // Converted results are ordinary File objects on purpose: they
+                // must go through the E2E encryption path below, never be
+                // referenced by a server-side id (fixes D-07).
 
                 try {
                     console.log(`📤 Uploading file ${i + 1}/${selectedFiles.length}:`, file.name);
@@ -6561,6 +6791,67 @@
         }
 
 
+        // Toggle a per-group member block (C3). Distinct from the account-wide
+        // user block: this only hides the member inside this one group, for
+        // this viewer, and leaves them untouched everywhere else.
+        async function toggleChatMemberBlock(memberId, buttonEl) {
+            if (!activeChat || activeChat.type !== 'group' || !memberId) return;
+
+            const isBlocked = buttonEl?.dataset?.blocked === '1';
+            const verb = isBlocked ? 'Unblock' : 'Block';
+            if (!await confirm(`${verb} this member in this group?\n\nThey stay in the group; only you stop seeing their messages here.`)) {
+                return;
+            }
+
+            if (buttonEl) { buttonEl.disabled = true; buttonEl.textContent = '…'; }
+
+            try {
+                const url = isBlocked
+                    ? `${API_URL}/chats/${activeChat.id}/blocked/${encodeURIComponent(memberId)}`
+                    : `${API_URL}/chats/${activeChat.id}/blocked`;
+                const options = {
+                    method: isBlocked ? 'DELETE' : 'POST',
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                };
+                if (!isBlocked) {
+                    options.headers['Content-Type'] = 'application/json';
+                    options.body = JSON.stringify({ user_id: memberId });
+                }
+
+                const resp = await fetch(url, options);
+                const data = await resp.json().catch(() => ({}));
+
+                if (!resp.ok) {
+                    throw new Error(data.error || `Request failed (${resp.status})`);
+                }
+
+                if (buttonEl) {
+                    const nowBlocked = !isBlocked;
+                    buttonEl.dataset.blocked = nowBlocked ? '1' : '0';
+                    buttonEl.textContent = nowBlocked ? 'Unblock' : 'Block';
+                    buttonEl.style.background = nowBlocked ? 'rgba(76,175,80,0.15)' : 'transparent';
+                    buttonEl.style.color = nowBlocked ? '#4CAF50' : 'var(--text-secondary)';
+                }
+
+                // Reload the thread so the visible history matches the new
+                // filter immediately, without waiting for a re-open.
+                await loadMessages(activeChat.id);
+                showNotification('Success', isBlocked
+                    ? 'Member unblocked in this group'
+                    : 'Member blocked in this group');
+            } catch (err) {
+                console.error('Chat member block error:', err);
+                showError(err.message || 'Could not update the block');
+                if (buttonEl) {
+                    buttonEl.disabled = false;
+                    buttonEl.textContent = isBlocked ? 'Unblock' : 'Block';
+                }
+                return;
+            }
+
+            if (buttonEl) buttonEl.disabled = false;
+        }
+
         async function viewGroupMembers() {
             if (!activeChat || activeChat.type !== 'group') {
                 console.error('❌ Not a group chat or no active chat');
@@ -6662,6 +6953,21 @@
 
                 console.log('🎨 Starting to render members...');
 
+                // Members this viewer has hidden inside this group. Fetched
+                // before rendering so each row can show the correct action.
+                let blockedMemberIds = new Set();
+                try {
+                    const blockedResp = await fetch(
+                        `${API_URL}/chats/${activeChat.id}/blocked`,
+                        { headers: { 'Authorization': `Bearer ${authToken}` } });
+                    if (blockedResp.ok) {
+                        const blockedData = await blockedResp.json();
+                        (blockedData.blocked || []).forEach(b => blockedMemberIds.add(b.id));
+                    }
+                } catch (err) {
+                    console.warn('Could not load blocked members:', err);
+                }
+
                 // Build HTML string instead of DOM manipulation
                 let membersHTML = '';
 
@@ -6707,6 +7013,18 @@
                                     ${member.email || 'No email'} • ${roleText}
                                 </div>
                             </div>
+                            ${isYou ? '' : `
+                                <button class="member-block-btn"
+                                        data-member-id="${escapeHtml(member.id)}"
+                                        data-blocked="${blockedMemberIds.has(member.id) ? '1' : '0'}"
+                                        onclick="toggleChatMemberBlock('${escapeHtml(member.id)}', this)"
+                                        style="flex-shrink: 0; padding: 6px 12px; font-size: 12px; font-weight: 600;
+                                               border-radius: 8px; cursor: pointer; border: 1px solid var(--border-subtle);
+                                               background: ${blockedMemberIds.has(member.id) ? 'rgba(76,175,80,0.15)' : 'transparent'};
+                                               color: ${blockedMemberIds.has(member.id) ? '#4CAF50' : 'var(--text-secondary)'};">
+                                    ${blockedMemberIds.has(member.id) ? 'Unblock' : 'Block'}
+                                </button>
+                            `}
                         </div>
                     `;
                 });
@@ -8377,6 +8695,11 @@
                         }, 300);
                     }
 
+                    // The sidebar preview still shows the deleted message
+                    // otherwise: the thread was patched but the chat list was
+                    // never told, so the text stayed visible under the contact.
+                    await refreshChatPreviewAfterDelete(data.chat_id || activeChat?.id);
+
                     showNotification('Success', 'Message deleted');
                 } else {
                     throw new Error(data.error || 'Failed to delete message');
@@ -8384,6 +8707,38 @@
             } catch (error) {
                 console.error('❌ Delete error:', error);
                 showError('Failed to delete: ' + error.message);
+            }
+        }
+
+        // Recompute the sidebar preview for a chat after a message vanished.
+        // `delete for me` hides the message locally but the chat list keeps
+        // whatever preview it last rendered, so the deleted text lingers under
+        // the contact name. Re-read the thread and show the newest surviving
+        // message instead (or clear the preview when none remain).
+        async function refreshChatPreviewAfterDelete(chatId) {
+            if (!chatId) return;
+            const chat = chats.find(c => c.id === chatId);
+            if (!chat) return;
+
+            try {
+                const messages = await AppStorage.getMessages(chatId);
+                const alive = (messages || [])
+                    .filter(m => m && !m.deleted)
+                    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+                const newest = alive[alive.length - 1];
+                if (newest) {
+                    chat.last_message = newest.content || '';
+                    chat.last_message_type = newest.message_type || 'text';
+                    chat.last_message_time = newest.created_at;
+                } else {
+                    // Nothing left in this conversation: clear rather than lie.
+                    chat.last_message = '';
+                    chat.last_message_time = null;
+                }
+                await renderChats();
+            } catch (err) {
+                console.warn('Could not refresh chat preview:', err);
             }
         }
 

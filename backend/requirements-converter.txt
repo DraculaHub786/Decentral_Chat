@@ -9,6 +9,25 @@ Pillow>=12.2.0
 # PDF Processing
 PyPDF2>=3.0.1
 pdf2docx>=0.5.13  # CRITICAL: For PDF to DOCX with images support
+img2pdf>=0.5.1    # Lossless image -> PDF (JPEG bytes are embedded, not re-encoded)
+
+# ========================================
+# System binaries required by the v2 converter engines
+# ========================================
+# These are NOT pip packages. The registry probes for them at startup and
+# disables any route whose engine is missing, so nothing fails at request time.
+#
+#   soffice / libreoffice   -> all Office <-> PDF and Office <-> Office routes
+#   pandoc                  -> DOCX/ODT/RTF <-> HTML/MD/TXT/DOCX
+#   pdftotext / pdftoppm    -> PDF -> TXT/HTML/PNG/JPG
+#   ffmpeg                  -> all audio and video routes
+#
+# Linux (Debian/Ubuntu):
+#   apt-get install -y libreoffice-writer libreoffice-impress libreoffice-calc \
+#                      pandoc poppler-utils ffmpeg fonts-liberation
+#
+# fonts-liberation matters: without metric-compatible fonts, DOCX -> PDF
+# substitutes fonts and the fidelity tier drops.
 
 # Document Processing
 python-docx>=1.1.2

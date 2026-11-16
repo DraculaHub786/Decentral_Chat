@@ -24,15 +24,26 @@ from app.users.handlers import (get_current_user, update_profile, get_user_publi
 from app.contacts.handlers import (get_contacts, add_contact, remove_contact,
     block_user, unblock_user, check_blocked_status, get_blocked_users)
 from app.chats.handlers import (get_chats, create_chat, get_chat, delete_chat,
-    add_chat_member, remove_chat_member, update_group_chat)
+    add_chat_member, remove_chat_member, update_group_chat,
+    block_chat_member, unblock_chat_member, list_blocked_chat_members)
 from app.messages.handlers import (get_messages, search_messages_in_chat,
     send_message_http, delete_message, edit_message, delete_message_for_all,
     delete_message_for_me, forward_message)
 from app.files.handlers import (upload_file, upload_voice, get_file, get_thumbnail,
     serve_upload, generate_thumbnail, get_file_type, _check_upload_rate_limit,
-    migrate_existing_files)
+    migrate_existing_files, hydrate_media_urls)
 from app.files.converters.service import (convert_uploaded_file,
     get_conversion_formats, get_conversion_progress)
+from app.files.converters.routes import (capabilities_handler, create_job_handler,
+    job_status_handler, job_result_handler, cancel_job_handler, formats_handler,
+    janitor_loop)
+from app.files.converters import workspace as converter_workspace
+from app.files.converters import settings as converter_settings
+from app.files.converters import jobs as converter_jobs
+from app.files.converters import queue as converter_queue
+from app.files.converters.batch import (batch_convert_handler,
+    batch_status_handler, batch_result_handler)
+from app.files.converters.health import health_handler
 from app.calls.handlers import (initiate_call, handle_call_signal, get_call_signals,
     end_call, get_call_history)
 from app.calls.group.handlers import (initiate_group_call, join_group_call,
@@ -105,7 +116,27 @@ class DecentralChatServer:
             asyncio.create_task(sync_redis_to_firestore_periodically(self))
             logger.info("✅ Started periodic Firestore sync")
 
+        self._start_converter_runtime()
         logger.info("✅ Server initialized successfully")
+
+    def _start_converter_runtime(self):
+        """Start the conversion worker pool and the workspace janitor."""
+        if not converter_settings.CONVERTER_V2_ENABLED:
+            logger.info("Converter v2 disabled; skipping worker startup")
+            return
+        try:
+            converter_settings.ensure_work_dir()
+            work_queue = converter_queue.get_queue(
+                getattr(g, "redis_client", None),
+                backend=converter_settings.CONVERTER_QUEUE_BACKEND,
+            )
+            self.converter_workers = converter_jobs.start_inline_workers(work_queue)
+            logger.info("✅ Converter runtime: queue=%s, %d worker(s)",
+                        work_queue.name, len(self.converter_workers))
+            asyncio.create_task(janitor_loop())
+            logger.info("✅ Converter janitor started")
+        except Exception:
+            logger.exception("Converter runtime failed to start")
 
     def setup_session(self):
         secret_key = SECRET_KEY.encode()[:32].ljust(32, b'0')
@@ -162,6 +193,12 @@ class DecentralChatServer:
         self.app.router.add_post('/api/chats/{chat_id}/members', functools.partial(add_chat_member, self))
         self.app.router.add_delete('/api/chats/{chat_id}/members/{user_id}', functools.partial(remove_chat_member, self))
 
+        # Per-group member blocking. Deliberately distinct from
+        # /api/users/block, which is account-wide and symmetric.
+        self.app.router.add_get('/api/chats/{chat_id}/blocked', functools.partial(list_blocked_chat_members, self))
+        self.app.router.add_post('/api/chats/{chat_id}/blocked', functools.partial(block_chat_member, self))
+        self.app.router.add_delete('/api/chats/{chat_id}/blocked/{user_id}', functools.partial(unblock_chat_member, self))
+
         # Messages
         self.app.router.add_get('/api/chats/{chat_id}/messages', functools.partial(get_messages, self))
         self.app.router.add_post('/api/chats/{chat_id}/messages', functools.partial(send_message_http, self))
@@ -173,11 +210,33 @@ class DecentralChatServer:
         self.app.router.add_post('/api/upload', upload_file)
         self.app.router.add_post('/api/upload/file', upload_file)
         self.app.router.add_post('/api/upload/voice', upload_voice)
+        self.app.router.add_post('/api/files/media-urls', hydrate_media_urls)
+        # Batch conversion (Phase 5b). Registered before the {file_id}
+        # route below: aiohttp matches in registration order, so a later
+        # registration would send /api/files/batch to get_file.
+        self.app.router.add_post('/api/files/batch', batch_convert_handler)
+        self.app.router.add_get('/api/files/batch/{batch_id}',
+                                batch_status_handler)
+        self.app.router.add_get('/api/files/batch/{batch_id}/result',
+                                batch_result_handler)
+
         self.app.router.add_get('/api/files/{file_id}', get_file)
         self.app.router.add_get('/api/files/{file_id}/thumbnail', get_thumbnail)
         self.app.router.add_post('/api/files/convert', convert_uploaded_file)
         self.app.router.add_get('/api/files/conversion-formats', get_conversion_formats)
         self.app.router.add_get('/api/files/conversion-progress/{conversion_id}', get_conversion_progress)
+
+        # Converter API v2 (plan S3.5) -- registry-backed, job-based.
+        # Health is registered before `{file_id}` would ever see it, and it is
+        # the only converter endpoint that is intentionally unauthenticated:
+        # a load balancer must be able to probe it without a user token.
+        self.app.router.add_get('/api/files/convert/health', health_handler)
+        self.app.router.add_get('/api/files/capabilities', capabilities_handler)
+        self.app.router.add_get('/api/files/formats', formats_handler)
+        self.app.router.add_post('/api/files/jobs', create_job_handler)
+        self.app.router.add_get('/api/files/jobs/{job_id}', job_status_handler)
+        self.app.router.add_get('/api/files/jobs/{job_id}/result', job_result_handler)
+        self.app.router.add_delete('/api/files/jobs/{job_id}', cancel_job_handler)
 
         # Calls
         self.app.router.add_post('/api/calls/initiate', functools.partial(initiate_call, self))

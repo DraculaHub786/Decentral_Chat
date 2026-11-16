@@ -27,6 +27,13 @@ try:
     from app.core.config import UPLOAD_DIR, MAX_FILE_SIZE, ALLOWED_EXTENSIONS, SECRET_KEY
     from app.core.security import _validate_file_magic, _resolve_safe_path
     from app.auth.tokens import get_user_from_token
+    from app.chats.membership import is_chat_member, chat_id_for_file, backfill_attachment_chat_ids
+    from app.files.media_tokens import (
+        MEDIA_TOKEN_QUERY_PARAM,
+        normalise_media_name,
+        signed_media_url,
+        token_allows,
+    )
 except ImportError:
     from ..globals import g
     from ..core.config import UPLOAD_DIR, MAX_FILE_SIZE, ALLOWED_EXTENSIONS, SECRET_KEY
@@ -515,6 +522,85 @@ async def get_thumbnail(request: web.Request) -> web.Response:
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def _file_meta_for_path(file_path: Path) -> Optional[dict]:
+    """Look up the file record for a stored path (owner + chat it belongs to)."""
+    path_str = str(file_path)
+    if not g.db:
+        return None
+    try:
+        docs = list(g.db.collection("files").where("path", "==", path_str).limit(1).stream())
+        if docs:
+            meta = docs[0].to_dict() or {}
+            meta.setdefault("id", docs[0].id)
+            return meta
+    except Exception as err:
+        logger.warning("Firestore path lookup failed for %s: %s", path_str, err)
+    return None
+
+
+async def _can_read_upload(file_path, user_id):
+    """The single rule for reading a private upload.
+
+    Allowed: the uploader, or a member of the chat the file was sent to.
+    Returns (allowed, file_record) so callers can reuse the metadata.
+    """
+    file_meta = await _file_meta_for_path(file_path)
+    if file_meta is None:
+        return False, None
+
+    if str(file_meta.get('user_id') or '') == user_id:
+        return True, file_meta
+
+    file_id = file_meta.get('id') or ''
+    chat_id = file_meta.get('chat_id') or await chat_id_for_file(file_id)
+    if chat_id and await is_chat_member(chat_id, user_id):
+        return True, file_meta
+
+    return False, file_meta
+
+
+async def hydrate_media_urls(request: web.Request) -> web.Response:
+    """Return signed, expiring URLs for uploads the caller may read."""
+    try:
+        user_id = await get_user_from_token(request)
+        if not user_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+        names = body.get("paths") if isinstance(body, dict) else None
+        if not isinstance(names, list):
+            return web.json_response({"error": "'paths' must be a list"}, status=400)
+        if len(names) > 200:
+            return web.json_response({"error": "Too many paths (max 200)"}, status=400)
+
+        urls = {}
+        for raw_name in names:
+            if not isinstance(raw_name, str):
+                continue
+            name = normalise_media_name(raw_name)
+            if not name:
+                continue
+            try:
+                file_path = _resolve_safe_path(UPLOAD_DIR, UPLOAD_DIR / name)
+            except ValueError:
+                continue
+            if not file_path.exists():
+                continue
+            allowed, _ = await _can_read_upload(file_path, user_id)
+            if allowed:
+                urls[raw_name] = signed_media_url(name, user_id)
+            else:
+                logger.info("Refused media URL for %s to user %s", name, user_id)
+        return web.json_response({"urls": urls})
+    except Exception as e:
+        logger.error(f"Hydrate media URLs error: {e}")
+        return web.json_response({"error": "Could not build media URLs"}, status=500)
+
+
 async def serve_upload(request: web.Request) -> web.Response:
     """Serve uploaded files with mandatory authentication for private media."""
     try:
@@ -535,27 +621,36 @@ async def serve_upload(request: web.Request) -> web.Response:
                 return web.json_response({"error": "Not found"}, status=404)
             return web.FileResponse(file_path)
 
-        # For all other uploaded files (images, audio, video, documents, voices),
-        # require valid authentication
-        token = request.query.get('token', '')
-        user_id = None
-        if token:
-            try:
-                payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
-                user_id = payload.get('user_id')
-            except Exception:
-                pass
-
-        if not user_id:
-            user_id = await get_user_from_token(request)
-
-        if not user_id:
-            return web.json_response({"error": "Unauthorized file access"}, status=401)
-
         if not file_path.exists():
             return web.json_response({"error": "Not found"}, status=404)
 
-        return web.FileResponse(file_path)
+        # Two ways in, both narrow:
+        #   1. a signed media URL (one file, one user, one hour), for <img> and
+        #      friends which cannot send an Authorization header;
+        #   2. a normal authenticated request, subject to the ownership rule.
+        # A session JWT is never accepted in the query string: it is long-lived
+        # and leaks into logs, history and proxy caches.
+        media_token = request.query.get(MEDIA_TOKEN_QUERY_PARAM, '')
+        if media_token:
+            user_id = await get_user_from_token(request)
+            if user_id and token_allows(media_token, filename, user_id):
+                return web.FileResponse(file_path)
+            logger.warning("Rejected media token for %s", filename)
+            return web.json_response({"error": "Forbidden"}, status=403)
+
+        user_id = await get_user_from_token(request)
+        if not user_id:
+            return web.json_response({"error": "Unauthorized file access"}, status=401)
+
+        allowed, file_meta = await _can_read_upload(file_path, user_id)
+        if allowed:
+            return web.FileResponse(file_path)
+
+        if file_meta is None:
+            logger.warning("Denied unindexed upload access: %s (user %s)", filename, user_id)
+        else:
+            logger.warning("Blocked cross-user file access: user=%s file=%s", user_id, filename)
+        return web.json_response({"error": "Forbidden"}, status=403)
     except Exception as e:
         logger.error(f"Serve upload error: {e}")
         return web.json_response({"error": "Not found"}, status=404)
@@ -568,6 +663,16 @@ async def migrate_existing_files(self=None):
         return
     
     logger.info("🔧 Starting file migration...")
+
+    # Legacy attachments predate the file-to-chat binding, so the download
+    # endpoint refuses them even to the recipient. Rebuild the link from the
+    # message that references each file. Idempotent.
+    try:
+        repaired = await backfill_attachment_chat_ids()
+        if repaired:
+            logger.info("Backfilled chat binding for %d attachment(s)", repaired)
+    except Exception as e:
+        logger.error("Attachment backfill failed: %s", e)
     
     try:
         files_ref = g.db.collection('files')
@@ -633,6 +738,7 @@ __all__ = [
     "get_file",
     "get_thumbnail",
     "serve_upload",
+    "hydrate_media_urls",
     "generate_thumbnail",
     "get_file_type",
     "_check_upload_rate_limit",

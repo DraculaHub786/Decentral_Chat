@@ -144,11 +144,121 @@ redis_client: Optional[redis.Redis] = None
 
 
 
+# Signatures for every container format we accept, not just images (D-15).
+_MAGIC_SIGNATURES = {
+    'png': (b'\x89PNG\r\n\x1a\n',),
+    'jpg': (b'\xff\xd8\xff',),
+    'jpeg': (b'\xff\xd8\xff',),
+    'gif': (b'GIF87a', b'GIF89a'),
+    'bmp': (b'BM',),
+    'ico': (b'\x00\x00\x01\x00',),
+    'tiff': (b'II*\x00', b'MM\x00*'),
+    'tif': (b'II*\x00', b'MM\x00*'),
+    'pdf': (b'%PDF',),
+    'mp3': (b'ID3', b'\xff\xfb', b'\xff\xf3', b'\xff\xf2'),
+    'flac': (b'fLaC',),
+    'ogg': (b'OggS',),
+    'opus': (b'OggS',),
+    'mp4': (b'ftyp',),
+    'm4a': (b'ftyp',),
+    'mov': (b'ftyp',),
+    'webm': (b'\x1a\x45\xdf\xa3',),
+    'mkv': (b'\x1a\x45\xdf\xa3',),
+    'webp': (b'RIFF',),
+    'wav': (b'RIFF',),
+    'avi': (b'RIFF',),
+}
+
+# Offset-aware signatures (the fourcc sits after the box/container length).
+_MAGIC_AT_OFFSET = {
+    'mp4': (4, b'ftyp'),
+    'm4a': (4, b'ftyp'),
+    'mov': (4, b'ftyp'),
+    'webp': (8, b'WEBP'),
+}
+
+# These are ZIP containers; the OOXML/OASIS members must be present.
+_ZIP_FORMATS = {'docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp', 'epub', 'jar'}
+_ZIP_MEMBERS = {
+    'docx': b'word/',
+    'xlsx': b'xl/',
+    'pptx': b'ppt/',
+    'odt': b'mimetype',
+    'ods': b'mimetype',
+    'odp': b'mimetype',
+    'epub': b'mimetype',
+}
+
+_TEXT_FORMATS = {'txt', 'md', 'csv', 'rtf', 'html', 'htm', 'svg', 'json', 'xml'}
+
+# Legacy/binary office formats share the OLE2 compound-file header.
+_OLE_FORMATS = {'doc', 'xls', 'ppt'}
+_OLE_SIGNATURE = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'
+
+
 def _validate_file_magic(file_path, expected_ext):
     """
-    Check magic bytes for images; for non-images, reject obvious script content.
-    Returns True if file looks safe, False otherwise.
+    Verify the file's real content matches its claimed extension (D-15).
+
+    The previous implementation returned True on any exception, so a corrupt or
+    hostile file passed validation whenever the check itself crashed. It now
+    fails closed: an unreadable file is rejected.
     """
+    ext = (expected_ext or '').lower().lstrip('.')
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(4096)
+    except OSError:
+        return False
+
+    if not header:
+        return False
+
+    # ZIP-container office formats.
+    if ext in _ZIP_FORMATS:
+        if not header.startswith(b'PK\x03\x04'):
+            return False
+        marker = _ZIP_MEMBERS.get(ext)
+        if marker is None:
+            return True
+        try:
+            with open(file_path, 'rb') as f:
+                head = f.read(65536)
+        except OSError:
+            return False
+        return marker in head
+
+    # Legacy OLE2 office formats.
+    if ext in _OLE_FORMATS:
+        return header.startswith(_OLE_SIGNATURE)
+
+    # Plain text carries no signature; reject embedded scripts instead.
+    if ext in _TEXT_FORMATS:
+        lowered = header.lower()
+        if ext in ('html', 'htm'):
+            return True
+        return not any(p in lowered for p in (b'<script', b'<?php'))
+
+    # Offset-aware container checks.
+    if ext in _MAGIC_AT_OFFSET:
+        offset, marker = _MAGIC_AT_OFFSET[ext]
+        if header[:4] != b'RIFF' and ext == 'webp':
+            return False
+        return header[offset:offset + len(marker)] == marker
+
+    expected = _MAGIC_SIGNATURES.get(ext)
+    if expected is None:
+        # Unknown-but-allowed extension: reject obvious script payloads.
+        lowered = header.lower()
+        return not any(p in lowered for p in (b'<script', b'<?php'))
+
+    if not any(header.startswith(sig) for sig in expected):
+        return False
+    return True
+
+
+def _validate_file_magic_legacy_unused(file_path, expected_ext):
+    """Kept only so the diff is explicit; not called."""
     try:
         with open(file_path, 'rb') as f:
             header = f.read(512)
@@ -293,5 +403,3 @@ def get_client_ip(request):
 
 
 # ==================== CSRF PROTECTION ====================
-
-

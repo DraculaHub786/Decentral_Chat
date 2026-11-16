@@ -25,6 +25,8 @@ from app.core.security import (_ensure_secret_key, _ensure_fernet_key,
 from app.core.rate_limiter import RateLimiter
 from app.core.redis_client import MockRedis, MockPipeline
 from app.core.firebase_client import init_firebase
+from app.chats.chat_blocks import (block_member_in_chat, unblock_member_in_chat,
+    blocked_members_in_chat)
 logger = logging.getLogger(__name__)
 async def get_chats(self, request):
     """Get user's chats - with Firestore fallback for missing data"""
@@ -568,3 +570,94 @@ async def update_group_chat(self, request):
         logger.error(f"Update group error: {e}", exc_info=True)
         return web.json_response({"error": str(e)}, status=500)
 
+
+# ---------------------------------------------------------------------------
+# Per-group member blocking (C3).
+#
+# Distinct from /api/users/block: that one hides a person across the whole
+# account. These hide one member inside one group for one viewer, which is what
+# a noisy group actually needs.
+# ---------------------------------------------------------------------------
+
+async def block_chat_member(self, request):
+    """POST /api/chats/{chat_id}/blocked — hide a member inside this chat."""
+    try:
+        user_id = await self.get_user_from_token(request)
+        if not user_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
+        chat_id = request.match_info["chat_id"]
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        target_id = (data.get("user_id") or "").strip()
+        if not target_id:
+            return web.json_response({"error": "user_id is required"}, status=400)
+        if target_id == user_id:
+            return web.json_response(
+                {"error": "You cannot block yourself"}, status=400)
+
+        chat_data = await g.redis_client.hgetall(f"chat:{chat_id}")
+        chat_type = chat_data.get("type") if chat_data else None
+        if isinstance(chat_type, bytes):
+            chat_type = chat_type.decode()
+        if chat_type == "direct":
+            return web.json_response(
+                {"error": "Use /api/users/block for direct chats"}, status=400)
+
+        ok = await block_member_in_chat(chat_id, user_id, target_id)
+        if not ok:
+            # Most likely a non-member or an unknown chat; both are 403, not 500.
+            return web.json_response(
+                {"error": "Both you and that user must be members of this chat"},
+                status=403)
+
+        return web.json_response({"success": True, "blocked_user_id": target_id})
+    except Exception as e:
+        logger.error(f"Block chat member error: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def unblock_chat_member(self, request):
+    """DELETE /api/chats/{chat_id}/blocked/{user_id} — restore visibility."""
+    try:
+        user_id = await self.get_user_from_token(request)
+        if not user_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
+        chat_id = request.match_info["chat_id"]
+        target_id = request.match_info["user_id"]
+
+        ok = await unblock_member_in_chat(chat_id, user_id, target_id)
+        if not ok:
+            return web.json_response({"error": "Forbidden"}, status=403)
+        return web.json_response({"success": True, "unblocked_user_id": target_id})
+    except Exception as e:
+        logger.error(f"Unblock chat member error: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def list_blocked_chat_members(self, request):
+    """GET /api/chats/{chat_id}/blocked — members this viewer has hidden."""
+    try:
+        user_id = await self.get_user_from_token(request)
+        if not user_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
+        chat_id = request.match_info["chat_id"]
+        blocked_ids = await blocked_members_in_chat(chat_id, user_id)
+
+        blocked = []
+        for member_id in blocked_ids:
+            member = await g.redis_client.hgetall(f"user:{member_id}")
+            blocked.append({
+                "id": member_id,
+                "username": member.get("username") if member else "Unknown",
+                "avatar_url": member.get("avatar_url") if member else "",
+            })
+        return web.json_response({"success": True, "blocked": blocked})
+    except Exception as e:
+        logger.error(f"List blocked chat members error: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
